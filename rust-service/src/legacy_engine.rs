@@ -467,6 +467,12 @@ struct PartBlock {
     current_stock_before: Option<f64>,
     inbound_plus_stock: Option<f64>,
     current_stock_updated: Option<f64>,
+    required_stock: Option<f64>,
+    available_stock_qty: Option<f64>,
+    shortage_gap: Option<f64>,
+    movement_net_qty: f64,
+    inventory_confirmed: bool,
+    inventory_match_status: String,
     inbound_count: usize,
     outbound_count: usize,
     inbound_dates_raw: Vec<String>,
@@ -478,6 +484,26 @@ struct PartBlock {
     stock_row_idx: Vec<usize>,
     inbound_row_idx: Vec<usize>,
     outbound_row_idx: Vec<usize>,
+    document_context: Option<DocumentContext>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct DocumentContext {
+    received_date: String,
+    used_date_last: String,
+    used_where: String,
+    usage_reason: String,
+    replacement_reason: String,
+    required_stock: Option<f64>,
+    issued_qty: String,
+    replacement_dates: [String; 6],
+    replacement_qtys: [String; 6],
+    replacement_hosts: [String; 6],
+    vendor_name: String,
+    manufacturer_name: String,
+    unit: String,
+    unit_price: Option<f64>,
+    has_replacement_history: bool,
 }
 
 fn main() -> Result<()> {
@@ -1121,6 +1147,15 @@ fn build_snapshot(
         .unwrap_or_else(|| Local::now().format("%Y-%m-%d").to_string());
     let stock_rows = read_stock(stock_path)?;
     let outbound_rows = read_outbound(outbound_path)?;
+    let k_required_stock = normalize_keys(&[
+        "필수재고량",
+        "필수 재고량",
+        "최소재고",
+        "min_stock",
+        "safety_stock",
+    ]);
+    let k_available_stock = normalize_keys(&["가용재고량", "가용 재고량", "available_stock"]);
+    let k_shortage_gap = normalize_keys(&["과부족", "shortage_gap"]);
 
     let mut by_key: BTreeMap<String, PartBlock> = BTreeMap::new();
 
@@ -1191,18 +1226,49 @@ fn build_snapshot(
         block.outbound_dates.sort();
         block.outbound_dates.dedup();
 
-        // 1) current stock column raise
-        let current_before = block.current_stock_before.unwrap_or(0.0);
-        // 2) add inbound + stock
-        let inbound_plus_stock = current_before + block.inbound_qty_sum;
-        // 3) update current stock
-        let updated = inbound_plus_stock - block.outbound_qty_sum;
+        let stock_row = block
+            .stock_row_idx
+            .first()
+            .and_then(|idx| stock_rows.get(*idx));
+        block.required_stock = stock_row.and_then(|row| {
+            let raw = pick_first_col(&row.header_norm_index, &row.cells, &k_required_stock);
+            parse_numeric_text(&raw)
+        });
+        block.available_stock_qty = stock_row.and_then(|row| {
+            let raw = pick_first_col(&row.header_norm_index, &row.cells, &k_available_stock);
+            parse_numeric_text(&raw)
+        });
+        block.shortage_gap = stock_row.and_then(|row| {
+            let raw = pick_first_col(&row.header_norm_index, &row.cells, &k_shortage_gap);
+            parse_numeric_text(&raw)
+        });
 
-        block.inbound_plus_stock = Some(inbound_plus_stock);
-        block.current_stock_updated = Some(updated);
+        let has_stock = !block.stock_row_idx.is_empty();
+        let has_inbound = !block.inbound_row_idx.is_empty();
+        let has_outbound = !block.outbound_row_idx.is_empty();
+        block.inventory_confirmed = has_stock;
+        block.inventory_match_status = match (has_stock, has_inbound, has_outbound) {
+            (true, true, true) => "matched_all",
+            (true, true, false) => "stock_inbound",
+            (true, false, true) => "stock_outbound",
+            (true, false, false) => "stock_only",
+            (false, true, true) => "movement_only",
+            (false, true, false) => "inbound_only",
+            (false, false, true) => "outbound_only",
+            (false, false, false) => "unclassified",
+        }
+        .to_string();
+
+        block.movement_net_qty = block.inbound_qty_sum - block.outbound_qty_sum;
+        block.inbound_plus_stock = block
+            .current_stock_before
+            .map(|current_before| current_before + block.inbound_qty_sum);
+        block.current_stock_updated = block
+            .current_stock_before
+            .map(|current_before| current_before + block.movement_net_qty);
     }
 
-    Ok(Snapshot {
+    let mut snapshot = Snapshot {
         meta: SnapshotMeta {
             generated_at: Local::now().to_rfc3339(),
             snapshot_date,
@@ -1217,9 +1283,10 @@ fn build_snapshot(
                 part_rows: "index_reference_only".to_string(),
             },
             calc_order: vec![
-                "1.current_stock_before".to_string(),
-                "2.inbound_plus_stock = current_stock_before + inbound_qty_sum".to_string(),
-                "3.current_stock_updated = inbound_plus_stock - outbound_qty_sum".to_string(),
+                "1.current_stock_before = stock_file.current_stock".to_string(),
+                "2.movement_net_qty = inbound_qty_sum - outbound_qty_sum".to_string(),
+                "3.current_stock_updated = current_stock_before + movement_net_qty (stock row exists when available)"
+                    .to_string(),
             ],
         },
         parts: by_key,
@@ -1228,7 +1295,27 @@ fn build_snapshot(
             stock_rows,
             outbound_rows,
         },
-    })
+    };
+
+    let part_keys = snapshot.parts.keys().cloned().collect::<Vec<_>>();
+    let contexts = part_keys
+        .iter()
+        .filter_map(|part_key| {
+            snapshot.parts.get(part_key).map(|part| {
+                (
+                    part_key.clone(),
+                    build_part_document_context(&snapshot, part),
+                )
+            })
+        })
+        .collect::<Vec<_>>();
+    for (part_key, context) in contexts {
+        if let Some(part) = snapshot.parts.get_mut(&part_key) {
+            part.document_context = Some(context);
+        }
+    }
+
+    Ok(snapshot)
 }
 
 fn init_part_block(
@@ -1242,6 +1329,16 @@ fn init_part_block(
         current_stock_before,
         inbound_plus_stock: None,
         current_stock_updated: None,
+        required_stock: None,
+        available_stock_qty: None,
+        shortage_gap: None,
+        movement_net_qty: 0.0,
+        inventory_confirmed: current_stock_before.is_some(),
+        inventory_match_status: if current_stock_before.is_some() {
+            "stock_only".to_string()
+        } else {
+            "unclassified".to_string()
+        },
         inbound_count: 0,
         outbound_count: 0,
         inbound_dates_raw: Vec::new(),
@@ -1253,6 +1350,164 @@ fn init_part_block(
         stock_row_idx: Vec::new(),
         inbound_row_idx: Vec::new(),
         outbound_row_idx: Vec::new(),
+        document_context: None,
+    }
+}
+
+fn default_six_slots() -> [String; 6] {
+    std::array::from_fn(|_| String::new())
+}
+
+fn build_part_document_context(snapshot: &Snapshot, part: &PartBlock) -> DocumentContext {
+    let k_out_equip_name = normalize_keys(&["장비명", "주요장비명"]);
+    let k_out_equip_no = normalize_keys(&["장비번호"]);
+    let k_out_model_fallback = normalize_keys(&["주요Model명", "Model명"]);
+    let k_out_usage_reason = normalize_keys(&["운영구분", "지급구분", "요청번호"]);
+    let k_out_replacement_reason = normalize_keys(&["지급구분", "운영구분", "요청번호"]);
+    let k_out_issued_qty = normalize_keys(&["지급량"]);
+    let k_vendor = normalize_keys(&[
+        "납품업체",
+        "납품업체명",
+        "거래처",
+        "업체",
+        "공급업체",
+        "구매업체",
+    ]);
+    let k_unit = normalize_keys(&["단위"]);
+    let k_unit_price = normalize_keys(&[
+        "단가",
+        "구단가",
+        "재고금액(원)",
+        "재고 금액(원)",
+        "재고금액",
+        "금액",
+    ]);
+    let k_used_where_stock = normalize_keys(&["주요장비명", "장비명", "재고번호"]);
+    let k_manufacturer = normalize_keys(&["주요Model명", "Model명", "부품제조사", "부품 제조사"]);
+    let k_required_stock = normalize_keys(&[
+        "필수재고량",
+        "필수 재고량",
+        "최소재고",
+        "min_stock",
+        "safety_stock",
+    ]);
+
+    let received_date = part
+        .inbound_dates
+        .first()
+        .cloned()
+        .unwrap_or_else(|| "입고기록없음".to_string());
+    let mut used_date_last = part
+        .outbound_dates
+        .last()
+        .cloned()
+        .unwrap_or_else(|| "출고기록없음".to_string());
+    let mut used_where = "출고기록없음".to_string();
+    let mut usage_reason = "출고기록없음".to_string();
+    let mut replacement_reason = "출고기록없음".to_string();
+    let mut issued_qty = format!("{:.0}", part.outbound_qty_sum);
+    let mut replacement_dates = default_six_slots();
+    let mut replacement_qtys = default_six_slots();
+    let mut replacement_hosts = default_six_slots();
+    let mut unit = "기록없음".to_string();
+    let mut vendor_name = "기록없음".to_string();
+    let mut manufacturer_name = "기록없음".to_string();
+    let mut unit_price = "기록없음".to_string();
+
+    if let Some(out_idx) = part.outbound_row_idx.last() {
+        if let Some(row) = snapshot.raw.outbound_rows.get(*out_idx) {
+            let equip_name = pick_first_col(&row.header_norm_index, &row.cells, &k_out_equip_name);
+            let equip_no = pick_first_col(&row.header_norm_index, &row.cells, &k_out_equip_no);
+            let model_fallback =
+                pick_first_col(&row.header_norm_index, &row.cells, &k_out_model_fallback);
+            used_where = if equip_name != "기록없음" {
+                equip_name
+            } else if equip_no != "기록없음" {
+                equip_no
+            } else {
+                model_fallback
+            };
+            usage_reason = pick_first_col(&row.header_norm_index, &row.cells, &k_out_usage_reason);
+            replacement_reason = pick_first_col(
+                &row.header_norm_index,
+                &row.cells,
+                &k_out_replacement_reason,
+            );
+            issued_qty = pick_first_col(&row.header_norm_index, &row.cells, &k_out_issued_qty);
+            if let Some(d) = row.date_iso.clone() {
+                used_date_last = d;
+            }
+        }
+    }
+
+    let events = collect_replacement_events(snapshot, part);
+    let has_replacement_history = !events.is_empty();
+    if let Some(latest) = events.last() {
+        used_date_last = latest.date_iso.clone();
+        let slot_order = [0usize, 3, 1, 4, 2, 5];
+        for (i, ev) in events.iter().take(6).enumerate() {
+            let slot = slot_order[i];
+            replacement_dates[slot] = ev.date_iso.clone();
+            replacement_qtys[slot] = ev.qty.clone();
+            replacement_hosts[slot] = ev.host.clone();
+        }
+    }
+
+    if let Some(in_idx) = part.inbound_row_idx.last() {
+        if let Some(in_row) = snapshot.raw.inbound_rows.get(*in_idx) {
+            let v = pick_first_col(&in_row.header_norm_index, &in_row.cells, &k_vendor);
+            if v != "기록없음" {
+                vendor_name = v;
+            }
+            unit = pick_first_col(&in_row.header_norm_index, &in_row.cells, &k_unit);
+            unit_price = pick_first_col(&in_row.header_norm_index, &in_row.cells, &k_unit_price);
+        }
+    }
+
+    let stock_row = part
+        .stock_row_idx
+        .first()
+        .and_then(|idx| snapshot.raw.stock_rows.get(*idx));
+    if let Some(row) = stock_row {
+        if is_missing_doc_value(&used_where) {
+            used_where = pick_first_col(&row.header_norm_index, &row.cells, &k_used_where_stock);
+        }
+        if is_missing_doc_value(&vendor_name) {
+            vendor_name = pick_first_col(&row.header_norm_index, &row.cells, &k_vendor);
+        }
+        if is_missing_doc_value(&manufacturer_name) {
+            let m = pick_first_col(&row.header_norm_index, &row.cells, &k_manufacturer);
+            manufacturer_name = extract_manufacturer_name(&m);
+        }
+        if is_missing_doc_value(&unit) {
+            unit = pick_first_col(&row.header_norm_index, &row.cells, &k_unit);
+        }
+        if is_missing_doc_value(&unit_price) {
+            unit_price = pick_first_col(&row.header_norm_index, &row.cells, &k_unit_price);
+        }
+    }
+
+    let required_stock = stock_row.and_then(|row| {
+        let raw = pick_first_col(&row.header_norm_index, &row.cells, &k_required_stock);
+        parse_numeric_text(&raw)
+    });
+
+    DocumentContext {
+        received_date,
+        used_date_last,
+        used_where,
+        usage_reason,
+        replacement_reason,
+        required_stock,
+        issued_qty,
+        replacement_dates,
+        replacement_qtys,
+        replacement_hosts,
+        vendor_name,
+        manufacturer_name,
+        unit,
+        unit_price: parse_numeric_text(&unit_price),
+        has_replacement_history,
     }
 }
 

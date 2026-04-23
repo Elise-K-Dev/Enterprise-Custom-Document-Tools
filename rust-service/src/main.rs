@@ -160,20 +160,34 @@ struct LegacyShortagesQuery {
 
 #[derive(Debug, Serialize)]
 struct LegacyShortagesResponse {
+    data_source: String,
+    source_policy: String,
+    snapshot_json_path: String,
     snapshot_date: Option<String>,
     total_count: usize,
+    unverified_count: usize,
+    markdown_table: String,
+    unverified_markdown_table: Option<String>,
     items: Vec<LegacyShortageItem>,
+    unverified_items: Vec<LegacyShortageItem>,
 }
 
 #[derive(Debug, Serialize, Clone)]
 struct LegacyShortageItem {
     part_name: String,
     part_no: String,
-    current_stock_before: f64,
-    current_stock_updated: f64,
+    current_stock: Option<f64>,
+    required_stock: Option<f64>,
+    available_stock: Option<f64>,
+    shortage_gap: Option<f64>,
+    shortage_quantity: Option<f64>,
+    projected_stock_balance: Option<f64>,
+    movement_net_qty: f64,
     inbound_qty_sum: f64,
     outbound_qty_sum: f64,
     outbound_count: usize,
+    inventory_confirmed: bool,
+    inventory_match_status: String,
     stock_status: String,
     summary: String,
     document_request_hint: String,
@@ -197,6 +211,9 @@ struct LegacyItemContextResponse {
     part_name: String,
     part_no: String,
     context: String,
+    data_source: String,
+    source_policy: String,
+    snapshot_json_path: String,
     fields_seed: BTreeMap<String, serde_json::Value>,
     guided_fields: Vec<GuidedFieldSpec>,
     assistant_summary: String,
@@ -306,7 +323,7 @@ async fn openapi_spec() -> Json<serde_json::Value> {
                 "post": {
                     "operationId": "create_document",
                     "summary": "대화형 구매 품의 문서 채우기 세션 시작",
-                    "description": "사용자의 최초 요청을 바탕으로 Rust 문서 채우기 세션을 만들고 누락 필드와 다음 질문을 반환한다.",
+                    "description": "사용자의 최초 요청을 바탕으로 Rust 문서 채우기 세션을 만들고 누락 필드와 다음 질문을 반환한다. 품명 또는 품번이 입력에 포함되면 전처리 완료된 stock_in_out_monthly.json 스냅샷을 기준으로 품명, 품번, 현재고, 교체이력 관련 필드를 자동 보강한다.",
                     "requestBody": {
                         "required": true,
                         "content": {
@@ -329,7 +346,7 @@ async fn openapi_spec() -> Json<serde_json::Value> {
                 "post": {
                     "operationId": "fill_document",
                     "summary": "대화형 구매 품의 문서 필드 추가 채움",
-                    "description": "이전 세션 상태와 현재 사용자 답변을 합쳐 필드를 갱신하고 다음으로 채울 칸을 반환한다. 사용자가 납품업체: 지정 협력사 처럼 말하면 해당 칸을 확정한다.",
+                    "description": "이전 세션 상태와 현재 사용자 답변을 합쳐 필드를 갱신하고 다음으로 채울 칸을 반환한다. 사용자가 납품업체: 지정 협력사 처럼 말하면 해당 칸을 확정한다. 품명 또는 품번이 확인되면 전처리 완료된 stock_in_out_monthly.json 스냅샷을 기준으로 재고 및 이력 필드를 다시 보강한다.",
                     "requestBody": {
                         "required": true,
                         "content": {
@@ -357,7 +374,7 @@ async fn openapi_spec() -> Json<serde_json::Value> {
                 "post": {
                     "operationId": "export_document",
                     "summary": "채워진 필드로 문서 내보내기",
-                    "description": "대화형으로 채운 필드를 사용해 문서 파일 내용을 생성한다. docx 형식이면 Rust 레거시 DOCX 렌더러를 사용한다.",
+                    "description": "대화형으로 채운 필드를 사용해 문서 파일 내용을 생성한다. docx 형식이면 Rust 레거시 DOCX 렌더러를 사용한다. 품명 또는 품번이 채워져 있으면 렌더 직전에 전처리 완료된 stock_in_out_monthly.json 스냅샷 기준으로 재고/이력 필드를 다시 보강한다.",
                     "requestBody": {
                         "required": true,
                         "content": {
@@ -443,7 +460,7 @@ async fn openapi_spec() -> Json<serde_json::Value> {
                 "get": {
                     "operationId": "list_shortage_items",
                     "summary": "현재 재고 부족 또는 0 이하인 품목 조회",
-                    "description": "사용자가 현재 재고가 없는 품목, 부족한 품목, 구매가 필요한 품목을 물으면 이 도구를 사용한다.",
+                    "description": "사용자가 현재 재고가 없는 품목, 부족한 품목, 구매가 필요한 품목을 물으면 이 도구를 사용한다. 반드시 전처리 완료된 stock_in_out_monthly.json 스냅샷만 기준으로 답하고, 원천 엑셀 파일을 직접 현재 조회 근거로 설명하면 안 된다. 답변할 때 shortage_gap 같은 원시 필드명을 앞세우지 말고, 반드시 '현재고 X개, 필수재고 Y개로 Z개 부족' 형식의 자연어를 사용한다. 응답에 markdown_table 필드가 있으면 그 값을 우선 사용해 마크다운 표로 보여준다.",
                     "parameters": [
                         {
                             "name": "query",
@@ -471,7 +488,7 @@ async fn openapi_spec() -> Json<serde_json::Value> {
                 "get": {
                     "operationId": "get_item_document_context",
                     "summary": "선택한 품목의 문서 작성 컨텍스트 조회",
-                    "description": "사용자가 특정 품목으로 구매 품의 문서를 작성하려 할 때 이 도구를 사용한다. 문서 채우기에 필요한 컨텍스트와 필드 seed, 한국어 guided field 목록을 반환한다.",
+                    "description": "사용자가 특정 품목으로 구매 품의 문서를 작성하려 할 때 이 도구를 사용한다. 문서 채우기에 필요한 컨텍스트와 필드 seed, 한국어 guided field 목록을 반환한다. 반드시 전처리 완료된 stock_in_out_monthly.json 스냅샷만 기준으로 답하고, 원천 엑셀 파일을 직접 현재 조회 근거로 설명하면 안 된다.",
                     "parameters": [
                         {
                             "name": "part_name",
@@ -497,7 +514,7 @@ async fn openapi_spec() -> Json<serde_json::Value> {
                 "post": {
                     "operationId": "export_single_item_document",
                     "summary": "선택 품목의 단건 구매 품의 문서 생성",
-                    "description": "선택한 품목의 seed 필드와 대화형으로 채운 필드를 합쳐 단건 DOCX를 만들고 다운로드 URL을 반환한다.",
+                    "description": "선택한 품목의 seed 필드와 대화형으로 채운 필드를 합쳐 단건 DOCX를 만들고 다운로드 URL을 반환한다. 품명, 품번, 현재고, 입고/출고 이력은 전처리 완료된 stock_in_out_monthly.json 스냅샷 값을 권위값으로 사용한다.",
                     "requestBody": {
                         "required": true,
                         "content": {
@@ -528,7 +545,7 @@ async fn openapi_spec() -> Json<serde_json::Value> {
                 "post": {
                     "operationId": "approve_and_generate_item_document",
                     "summary": "승인/진행 의사 이후 단건 구매 품의 문서 최종 생성",
-                    "description": "사용자가 승인해, 진행해 같은 긍정 의사를 보이면 이 도구를 사용한다. 가격 기준 문서 생성 방침을 적용하고, 일반적인 기본값을 채워 초안과 다운로드 URL을 함께 반환한다.",
+                    "description": "사용자가 승인해, 진행해 같은 긍정 의사를 보이면 이 도구를 사용한다. 가격 기준 문서 생성 방침을 적용하고, 일반적인 기본값을 채워 초안과 다운로드 URL을 함께 반환한다. 재고와 교체 이력은 전처리 완료된 stock_in_out_monthly.json 스냅샷을 기준으로 덮어쓴다.",
                     "requestBody": {
                         "required": true,
                         "content": {
@@ -634,7 +651,8 @@ async fn create_document(
     let template = template_for(&state, &req.template_id)?;
     let session_id = Uuid::new_v4().to_string();
 
-    let fields = extract_fields(template, &req.input_text);
+    let mut fields = extract_fields(template, &req.input_text);
+    enrich_purchase_request_from_snapshot(&state, &req.input_text, &mut fields)?;
     let missing_fields = compute_missing_fields(template, &fields);
     let next_question = missing_fields.first().map(|field| next_question_for(field));
     let preview_text = render_preview(template, &fields);
@@ -679,6 +697,8 @@ async fn fill_document(
         merged_fields.insert(key, value);
     }
 
+    enrich_purchase_request_from_snapshot(&state, &req.user_message, &mut merged_fields)?;
+
     let missing_fields = compute_missing_fields(template, &merged_fields);
     let next_question = missing_fields.first().map(|field| next_question_for(field));
     let preview_text = render_preview(template, &merged_fields);
@@ -710,7 +730,9 @@ async fn export_document(
     Json(req): Json<ExportRequest>,
 ) -> Result<Json<ExportResponse>, AppError> {
     let template = template_for(&state, &req.template_id)?;
-    let preview_text = render_preview(template, &req.fields);
+    let mut fields = req.fields.clone();
+    enrich_purchase_request_from_snapshot(&state, "", &mut fields)?;
+    let preview_text = render_preview(template, &fields);
     let format = req.format.clone();
     let file_name = format!("{}_{}.{}", template.id, Uuid::new_v4(), format);
     let mime_type = match format.as_str() {
@@ -721,7 +743,7 @@ async fn export_document(
     .to_string();
 
     if let Some((template_path, bytes)) =
-        try_render_legacy_docx(&req.fields, &format).map_err(AppError::bad_request)?
+        try_render_legacy_docx(&fields, &format).map_err(AppError::bad_request)?
     {
         return Ok(Json(ExportResponse {
             file_name,
@@ -739,7 +761,7 @@ async fn export_document(
         "template_id": template.id,
         "display_name": template.display_name,
         "format": format,
-        "fields": req.fields,
+        "fields": fields,
         "preview_text": preview_text.clone(),
         "note": "MVP stub. Legacy DOCX templates were not found in Port-Project templates directory."
     });
@@ -893,6 +915,7 @@ async fn list_legacy_shortages(
     Query(query): Query<LegacyShortagesQuery>,
 ) -> Result<Json<LegacyShortagesResponse>, AppError> {
     let snapshot = load_latest_snapshot_json(&state)?;
+    let snapshot_json_path = current_snapshot_json_path(&state)?;
     let snapshot_date = snapshot
         .get("meta")
         .and_then(|meta| meta.get("snapshot_date"))
@@ -917,11 +940,30 @@ async fn list_legacy_shortages(
             }
         })
         .collect::<Vec<_>>();
+    let mut unverified_items = parts
+        .values()
+        .filter_map(build_unverified_shortage_item)
+        .filter(|item| {
+            if let Some(needle) = &needle {
+                let hay = normalize_lookup_text(&format!("{} {}", item.part_name, item.part_no));
+                hay.contains(needle)
+            } else {
+                true
+            }
+        })
+        .collect::<Vec<_>>();
 
     items.sort_by(|a, b| {
-        a.current_stock_updated
-            .partial_cmp(&b.current_stock_updated)
+        a.current_stock
+            .unwrap_or(f64::MAX)
+            .partial_cmp(&b.current_stock.unwrap_or(f64::MAX))
             .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| {
+                a.shortage_gap
+                    .unwrap_or(0.0)
+                    .partial_cmp(&b.shortage_gap.unwrap_or(0.0))
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
             .then_with(|| {
                 b.outbound_qty_sum
                     .partial_cmp(&a.outbound_qty_sum)
@@ -929,13 +971,35 @@ async fn list_legacy_shortages(
             })
             .then_with(|| a.part_name.cmp(&b.part_name))
     });
+    unverified_items.sort_by(|a, b| {
+        b.outbound_qty_sum
+            .partial_cmp(&a.outbound_qty_sum)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| {
+                a.movement_net_qty
+                    .partial_cmp(&b.movement_net_qty)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+            .then_with(|| a.part_name.cmp(&b.part_name))
+    });
     let total_count = items.len();
+    let unverified_count = unverified_items.len();
     items.truncate(limit);
+    unverified_items.truncate(limit);
+    let markdown_table = build_confirmed_shortage_markdown_table(&items);
+    let unverified_markdown_table = build_unverified_shortage_markdown_table(&unverified_items);
 
     Ok(Json(LegacyShortagesResponse {
+        data_source: "processed_snapshot_json".into(),
+        source_policy: "현재 조회는 전처리 완료된 stock_in_out_monthly.json 스냅샷만 기준으로 합니다. 원천 입고/재고/출고 엑셀은 배치 생성용 입력 데이터이며 직접 조회 근거로 사용하지 않습니다.".into(),
+        snapshot_json_path,
         snapshot_date,
         total_count,
+        unverified_count,
+        markdown_table,
+        unverified_markdown_table,
         items,
+        unverified_items,
     }))
 }
 
@@ -943,6 +1007,7 @@ async fn get_legacy_item_context(
     State(state): State<AppState>,
     Query(query): Query<LegacyItemContextQuery>,
 ) -> Result<Json<LegacyItemContextResponse>, AppError> {
+    let snapshot_json_path = current_snapshot_json_path(&state)?;
     let part = resolve_snapshot_part(&state, query.part_name.as_deref(), query.part_no.as_deref())?;
     let part_name = part
         .get("part_name")
@@ -954,14 +1019,15 @@ async fn get_legacy_item_context(
         .and_then(|value| value.as_str())
         .unwrap_or(&part_name)
         .to_string();
-    let current_stock_before = part
-        .get("current_stock_before")
-        .and_then(|value| value.as_f64())
-        .unwrap_or(0.0);
-    let current_stock_updated = part
-        .get("current_stock_updated")
-        .and_then(|value| value.as_f64())
-        .unwrap_or(current_stock_before);
+    let current_stock = part_current_stock(&part);
+    let projected_stock_balance = part_projected_stock_balance(&part);
+    let required_stock = part_required_stock(&part);
+    let available_stock = part_available_stock(&part);
+    let shortage_gap = part_shortage_gap(&part);
+    let movement_net_qty = part_movement_net_qty(&part);
+    let inventory_confirmed = part_inventory_confirmed(&part);
+    let inventory_match_status = part_inventory_match_status(&part);
+    let inventory_match_label = describe_inventory_match_status(&inventory_match_status);
     let inbound_qty_sum = part
         .get("inbound_qty_sum")
         .and_then(|value| value.as_f64())
@@ -974,17 +1040,29 @@ async fn get_legacy_item_context(
         .get("outbound_count")
         .and_then(|value| value.as_u64())
         .unwrap_or(0) as usize;
+    let current_stock_text = current_stock
+        .map(|value| format!("{value:.0}"))
+        .unwrap_or_else(|| "재고 미확인".to_string());
+    let projected_stock_text = projected_stock_balance
+        .map(|value| format!("{value:.0}"))
+        .unwrap_or_else(|| "-".to_string());
+    let required_stock_text = required_stock
+        .map(|value| format!("{value:.0}"))
+        .unwrap_or_else(|| "-".to_string());
+    let available_stock_text = available_stock
+        .map(|value| format!("{value:.0}"))
+        .unwrap_or_else(|| "-".to_string());
+    let shortage_gap_text = shortage_gap
+        .map(|value| format!("{value:.0}"))
+        .unwrap_or_else(|| "-".to_string());
+    let stock_state = describe_inventory_state(current_stock, required_stock, inventory_confirmed);
 
     let context = format!(
-        "품목명: {part_name}\n품번: {part_no}\n현재고(기준): {current_stock_before:.0}\n현재고(업데이트): {current_stock_updated:.0}\n입고 합계: {inbound_qty_sum:.0}\n출고 합계: {outbound_qty_sum:.0}\n출고 건수: {outbound_count}\n상태: {}",
-        if current_stock_updated <= 0.0 { "재고 부족 또는 소진" } else { "재고 확인 필요" }
+        "품목명: {part_name}\n품번: {part_no}\n현재고(재고파일 기준): {current_stock_text}\n필수재고: {required_stock_text}\n가용재고: {available_stock_text}\n과부족(원본): {shortage_gap_text}\n3개년 이동 순증감: {movement_net_qty:.0}\n이력 기반 추정잔량: {projected_stock_text}\n입고 합계: {inbound_qty_sum:.0}\n출고 합계: {outbound_qty_sum:.0}\n출고 건수: {outbound_count}\n재고 매칭 상태: {inventory_match_label} ({inventory_match_status})\n상태: {stock_state}"
     );
 
     let mut fields_seed = BTreeMap::new();
-    fields_seed.insert("품명".into(), serde_json::Value::String(part_name.clone()));
-    fields_seed.insert("품번".into(), serde_json::Value::String(part_no.clone()));
-    fields_seed.insert("현재고".into(), serde_json::json!(current_stock_updated));
-    fields_seed.insert("수량".into(), serde_json::json!(1));
+    merge_snapshot_part_into_fields(&mut fields_seed, &part, Some(snapshot_json_path.as_str()));
     fields_seed.insert(
         "부품역할".into(),
         serde_json::Value::String("(직접입력)".into()),
@@ -994,41 +1072,20 @@ async fn get_legacy_item_context(
         serde_json::Value::String("(직접입력)".into()),
     );
 
-    let guided_fields = vec![
-        GuidedFieldSpec {
-            field: "구매사유".into(),
-            label: "구매 사유".into(),
-            prompt: "이 품목이 왜 지금 필요한지 재고 상황과 현장 위험을 포함해 한국어로 정리해줘."
-                .into(),
-        },
-        GuidedFieldSpec {
-            field: "담당자 직접입력".into(),
-            label: "담당자 확인".into(),
-            prompt: "이 문서를 검토하거나 설명할 담당자 정보를 한국어로 정리해줘.".into(),
-        },
-        GuidedFieldSpec {
-            field: "납품업체".into(),
-            label: "업체/거래처".into(),
-            prompt: "구매 예정 업체나 공급업체 정보를 한국어로 정리해줘.".into(),
-        },
-        GuidedFieldSpec {
-            field: "부품역할".into(),
-            label: "부품 설명".into(),
-            prompt:
-                "이 부품의 핵심 기능과 실제 사용 목적을 구매 품의 문서 본문용 한국어로 정리해줘."
-                    .into(),
-        },
-    ];
+    let guided_fields = build_guided_fields_for_purchase_request(&fields_seed);
 
     let assistant_summary = format!(
-        "{} ({}) 품목의 문서 작성 컨텍스트를 준비했습니다. 이제 guided_fields를 기준으로 대화형으로 값을 채운 뒤 단건 문서를 생성하면 됩니다.",
-        part_name, part_no
+        "{} ({}) 품목의 문서 작성 컨텍스트를 준비했습니다. 현재 조회 기준은 전처리 완료된 stock_in_out_monthly.json 스냅샷이며 원천 엑셀을 직접 참조한 답변이 아닙니다. 이제 guided_fields를 기준으로 대화형으로 값을 채운 뒤 단건 문서를 생성하면 됩니다.",
+        part_name, part_no,
     );
 
     Ok(Json(LegacyItemContextResponse {
         part_name,
         part_no,
         context,
+        data_source: "processed_snapshot_json".into(),
+        source_policy: "현재 조회는 전처리 완료된 stock_in_out_monthly.json 스냅샷만 기준으로 합니다. 원천 입고/재고/출고 엑셀은 배치 생성용 입력 데이터이며 직접 조회 근거로 사용하지 않습니다.".into(),
+        snapshot_json_path,
         fields_seed,
         guided_fields,
         assistant_summary,
@@ -1044,28 +1101,18 @@ async fn export_legacy_item_document(
         .clone()
         .ok_or_else(|| AppError::bad_request("legacy workdir is not configured".into()))?;
     let mut fields = req.fields.clone();
-
-    if fields.get("품명").is_none() || fields.get("품번").is_none() {
-        let part = resolve_snapshot_part(&state, req.part_name.as_deref(), req.part_no.as_deref())?;
-        if fields.get("품명").is_none() {
-            if let Some(value) = part.get("part_name").and_then(|value| value.as_str()) {
-                fields.insert("품명".into(), serde_json::Value::String(value.to_string()));
-            }
-        }
-        if fields.get("품번").is_none() {
-            if let Some(value) = part.get("part_no").and_then(|value| value.as_str()) {
-                fields.insert("품번".into(), serde_json::Value::String(value.to_string()));
-            }
-        }
-        if fields.get("현재고").is_none() {
-            if let Some(value) = part
-                .get("current_stock_updated")
-                .and_then(|value| value.as_f64())
-            {
-                fields.insert("현재고".into(), serde_json::json!(value));
-            }
-        }
-    }
+    let selected_part = resolve_snapshot_part_for_document(
+        &state,
+        &fields,
+        req.part_name.as_deref(),
+        req.part_no.as_deref(),
+    )?;
+    let snapshot_json_path = current_snapshot_json_path(&state)?;
+    merge_snapshot_part_into_fields(
+        &mut fields,
+        &selected_part,
+        Some(snapshot_json_path.as_str()),
+    );
 
     let (template_path, bytes) = try_render_legacy_docx(&fields, "docx")
         .map_err(AppError::bad_request)?
@@ -1122,7 +1169,12 @@ async fn approve_legacy_item_document(
         .clone()
         .ok_or_else(|| AppError::bad_request("legacy workdir is not configured".into()))?;
 
-    let part = resolve_snapshot_part(&state, req.part_name.as_deref(), req.part_no.as_deref())?;
+    let part = resolve_snapshot_part_for_document(
+        &state,
+        &req.fields,
+        req.part_name.as_deref(),
+        req.part_no.as_deref(),
+    )?;
     let part_name = part
         .get("part_name")
         .and_then(|value| value.as_str())
@@ -1133,28 +1185,14 @@ async fn approve_legacy_item_document(
         .and_then(|value| value.as_str())
         .unwrap_or(&part_name)
         .to_string();
-    let current_stock_updated = part
-        .get("current_stock_updated")
-        .and_then(|value| value.as_f64())
-        .unwrap_or(0.0);
     let outbound_qty_sum = part
         .get("outbound_qty_sum")
         .and_then(|value| value.as_f64())
         .unwrap_or(0.0);
 
     let mut fields = req.fields.clone();
-    fields
-        .entry("품명".into())
-        .or_insert_with(|| serde_json::Value::String(part_name.clone()));
-    fields
-        .entry("품번".into())
-        .or_insert_with(|| serde_json::Value::String(part_no.clone()));
-    fields
-        .entry("현재고".into())
-        .or_insert_with(|| serde_json::json!(current_stock_updated));
-    fields
-        .entry("수량".into())
-        .or_insert_with(|| serde_json::json!(1));
+    let snapshot_json_path = current_snapshot_json_path(&state)?;
+    merge_snapshot_part_into_fields(&mut fields, &part, Some(snapshot_json_path.as_str()));
     fields
         .entry("납품업체".into())
         .or_insert_with(|| serde_json::Value::String("지정 협력사".into()));
@@ -1175,9 +1213,16 @@ async fn approve_legacy_item_document(
     });
 
     let purchase_reason = req.purchase_reason.unwrap_or_else(|| {
-        format!(
-            "{} 품목은 현재 재고가 소진 또는 부족 상태이며 출고 누적 수량이 {:.0}건 반영된 상태입니다. 재고 소진으로 인한 설비 가동 중단 방지를 위해 우선 구매가 필요합니다.",
-            part_name, outbound_qty_sum
+        build_purchase_reason_from_snapshot(
+            &part_name,
+            part_current_stock(&part),
+            part_required_stock(&part),
+            part_movement_net_qty(&part),
+            outbound_qty_sum,
+            part.get("outbound_count")
+                .and_then(|value| value.as_u64())
+                .unwrap_or(0),
+            part_inventory_confirmed(&part),
         )
     });
     fields.insert(
@@ -1328,9 +1373,40 @@ fn merge_explicit_field_values(fields: &mut BTreeMap<String, serde_json::Value>,
         "품번",
         "현재고",
         "필수재고량",
+        "가용재고량",
+        "과부족",
+        "이동순증감",
+        "추정잔량",
+        "재고확인상태",
+        "재고매칭상태",
         "단가",
         "제조사",
         "단위",
+        "총 교체수량",
+        "교체내역 유무",
+        "입고일",
+        "사용일",
+        "사용처",
+        "문제점",
+        "교체사유",
+        "날짜1",
+        "날짜2",
+        "날짜3",
+        "날짜4",
+        "날짜5",
+        "날짜6",
+        "교체수량1",
+        "교체수량2",
+        "교체수량3",
+        "교체수량4",
+        "교체수량5",
+        "교체수량6",
+        "호기1",
+        "호기2",
+        "호기3",
+        "호기4",
+        "호기5",
+        "호기6",
     ];
 
     for raw_line in input.lines() {
@@ -1409,7 +1485,7 @@ fn extract_vendor(input: &str) -> Option<String> {
 
 fn next_question_for(field: &str) -> String {
     match field {
-        "품명" => "어떤 품목을 요청할까요?".into(),
+        "품명" => "어떤 품목을 요청할까요? 품명이나 품번을 알려주면 스냅샷 JSON 기준으로 재고를 자동 반영합니다.".into(),
         "수량" => "수량은 몇 개로 할까요?".into(),
         "납품업체" => "납품업체는 어디로 할까?".into(),
         "구매사유" => "구매사유는 어떻게 적을까요? 재고 부족, 설비 중단 위험, 사용 이력 중 확인된 근거를 알려주세요.".into(),
@@ -1424,13 +1500,19 @@ fn render_preview(
     fields: &BTreeMap<String, serde_json::Value>,
 ) -> String {
     let item = string_or_placeholder(fields.get("품명"));
+    let part_no = string_or_placeholder(fields.get("품번"));
+    let current_stock = string_or_placeholder(fields.get("현재고"));
     let quantity = string_or_placeholder(fields.get("수량"));
     let vendor = string_or_placeholder(fields.get("납품업체"));
+    let inventory_status = string_or_placeholder(fields.get("재고확인상태"));
 
     format!(
-        "[{}]\n- 품명: {}\n- 수량: {}\n- 납품업체: {}\n{}",
+        "[{}]\n- 품명: {}\n- 품번: {}\n- 현재고(재고파일 기준): {}\n- 재고확인상태: {}\n- 수량: {}\n- 납품업체: {}\n{}",
         template.display_name,
         item,
+        part_no,
+        current_stock,
+        inventory_status,
         quantity,
         vendor,
         preview_purchase_note(fields)
@@ -1447,6 +1529,14 @@ fn string_or_placeholder(value: Option<&serde_json::Value>) -> String {
 }
 
 fn preview_purchase_note(fields: &BTreeMap<String, serde_json::Value>) -> String {
+    if fields
+        .get("재고확인상태")
+        .and_then(|value| value.as_str())
+        .map(|value| value == "미확인")
+        .unwrap_or(false)
+    {
+        return "- 구매판단: 재고 미확인\n- 자동사유: 현재 재고파일에서 매칭되는 재고 행이 없어 재고를 확정할 수 없습니다. 최근 입출고 이력을 검토한 뒤 구매 여부를 판단해야 합니다.\n".into();
+    }
     let decision = decide_purchase_v2(
         as_f64(fields.get("필수재고량")),
         as_f64(fields.get("현재고")).unwrap_or(0.0),
@@ -1663,6 +1753,676 @@ fn load_latest_snapshot_json(state: &AppState) -> Result<serde_json::Value, AppE
         .map_err(|err| AppError::bad_request(format!("failed to parse snapshot json: {err}")))
 }
 
+fn current_snapshot_json_path(state: &AppState) -> Result<String, AppError> {
+    let workdir = state
+        .legacy_workdir
+        .clone()
+        .ok_or_else(|| AppError::bad_request("legacy workdir is not configured".into()))?;
+    let candidate = find_latest_snapshot_json(&workdir).or_else(|| {
+        legacy_engine::run_batch_once_from_workdir(&workdir, true, false)
+            .ok()
+            .and_then(|summary| {
+                summary
+                    .snapshot_json_path
+                    .map(|path| workdir.join(path))
+                    .filter(|path| path.exists())
+            })
+            .or_else(|| find_latest_snapshot_json(&workdir))
+    });
+    let candidate =
+        candidate.ok_or_else(|| AppError::bad_request("stock snapshot json not found".into()))?;
+    Ok(candidate.to_string_lossy().to_string())
+}
+
+fn enrich_purchase_request_from_snapshot(
+    state: &AppState,
+    input: &str,
+    fields: &mut BTreeMap<String, serde_json::Value>,
+) -> Result<(), AppError> {
+    let snapshot = load_latest_snapshot_json(state)?;
+    let parts = snapshot
+        .get("parts")
+        .and_then(|value| value.as_object())
+        .ok_or_else(|| AppError::bad_request("invalid snapshot format: parts missing".into()))?;
+    let Some(part) = find_snapshot_part_for_document(parts, input, fields) else {
+        return Ok(());
+    };
+    let snapshot_json_path = current_snapshot_json_path(state)?;
+    merge_snapshot_part_into_fields(fields, &part, Some(snapshot_json_path.as_str()));
+
+    Ok(())
+}
+
+fn merge_snapshot_part_into_fields(
+    fields: &mut BTreeMap<String, serde_json::Value>,
+    part: &serde_json::Value,
+    snapshot_json_path: Option<&str>,
+) {
+    let part_name = part
+        .get("part_name")
+        .and_then(|value| value.as_str())
+        .unwrap_or("기록없음")
+        .to_string();
+    let part_no = part
+        .get("part_no")
+        .and_then(|value| value.as_str())
+        .unwrap_or(&part_name)
+        .to_string();
+    let current_stock = part_current_stock(part);
+    let projected_stock_balance = part_projected_stock_balance(part);
+    let required_stock = part_required_stock(part);
+    let available_stock = part_available_stock(part);
+    let shortage_gap = part_shortage_gap(part);
+    let movement_net_qty = part_movement_net_qty(part);
+    let inventory_confirmed = part_inventory_confirmed(part);
+    let inventory_match_status = part_inventory_match_status(part);
+    let outbound_qty_sum = part
+        .get("outbound_qty_sum")
+        .and_then(|value| value.as_f64())
+        .unwrap_or(0.0);
+    let outbound_count = part
+        .get("outbound_count")
+        .and_then(|value| value.as_u64())
+        .unwrap_or(0);
+    let inbound_date = part
+        .get("inbound_dates")
+        .and_then(|value| value.as_array())
+        .and_then(|value| value.first())
+        .and_then(|value| value.as_str())
+        .unwrap_or("입고기록없음")
+        .to_string();
+    let used_date = part
+        .get("outbound_dates")
+        .and_then(|value| value.as_array())
+        .and_then(|value| value.last())
+        .and_then(|value| value.as_str())
+        .unwrap_or("출고기록없음")
+        .to_string();
+
+    fields.insert("품명".into(), serde_json::Value::String(part_name.clone()));
+    fields.insert("품번".into(), serde_json::Value::String(part_no.clone()));
+    set_optional_numeric_field(fields, "현재고", current_stock);
+    set_optional_numeric_field(fields, "필수재고량", required_stock);
+    set_optional_numeric_field(fields, "가용재고량", available_stock);
+    set_optional_numeric_field(fields, "과부족", shortage_gap);
+    set_optional_numeric_field(fields, "이동순증감", Some(movement_net_qty));
+    set_optional_numeric_field(fields, "추정잔량", projected_stock_balance);
+    fields.insert(
+        "재고확인상태".into(),
+        serde_json::Value::String(
+            if inventory_confirmed {
+                "확인"
+            } else {
+                "미확인"
+            }
+            .into(),
+        ),
+    );
+    fields.insert(
+        "재고매칭상태".into(),
+        serde_json::Value::String(describe_inventory_match_status(&inventory_match_status).into()),
+    );
+    fields.insert("총 교체수량".into(), serde_json::json!(outbound_qty_sum));
+    fields.insert(
+        "교체내역 유무".into(),
+        serde_json::Value::String(if outbound_count > 0 { "유" } else { "무" }.into()),
+    );
+    fields.insert("입고일".into(), serde_json::Value::String(inbound_date));
+    fields.insert("사용일".into(), serde_json::Value::String(used_date));
+
+    if let Some(document_context) = part
+        .get("document_context")
+        .and_then(|value| value.as_object())
+    {
+        if let Some(vendor_name) = snapshot_context_text(document_context.get("vendor_name")) {
+            fields
+                .entry("납품업체".into())
+                .or_insert_with(|| serde_json::Value::String(vendor_name));
+        }
+        if let Some(manufacturer_name) =
+            snapshot_context_text(document_context.get("manufacturer_name"))
+        {
+            fields
+                .entry("제조사".into())
+                .or_insert_with(|| serde_json::Value::String(manufacturer_name));
+        }
+        if let Some(unit) = snapshot_context_text(document_context.get("unit")) {
+            fields
+                .entry("단위".into())
+                .or_insert_with(|| serde_json::Value::String(unit));
+        }
+        if let Some(unit_price) = document_context
+            .get("unit_price")
+            .and_then(snapshot_context_number)
+        {
+            fields
+                .entry("단가".into())
+                .or_insert_with(|| serde_json::json!(unit_price));
+        }
+        if let Some(received_date) = snapshot_context_text(document_context.get("received_date")) {
+            fields.insert("입고일".into(), serde_json::Value::String(received_date));
+        }
+        if let Some(used_date_last) = snapshot_context_text(document_context.get("used_date_last"))
+        {
+            fields.insert("사용일".into(), serde_json::Value::String(used_date_last));
+        }
+        if let Some(used_where) = snapshot_context_text(document_context.get("used_where")) {
+            fields.insert("사용처".into(), serde_json::Value::String(used_where));
+        }
+        if let Some(usage_reason) = snapshot_context_text(document_context.get("usage_reason")) {
+            fields.insert("문제점".into(), serde_json::Value::String(usage_reason));
+        }
+        if let Some(replacement_reason) =
+            snapshot_context_text(document_context.get("replacement_reason"))
+        {
+            fields.insert(
+                "교체사유".into(),
+                serde_json::Value::String(replacement_reason),
+            );
+        }
+        if let Some(issued_qty) = snapshot_context_text(document_context.get("issued_qty")) {
+            fields.insert("총 교체수량".into(), parse_field_value(&issued_qty));
+        }
+        if let Some(has_replacement_history) = document_context
+            .get("has_replacement_history")
+            .and_then(|value| value.as_bool())
+        {
+            fields.insert(
+                "교체내역 유무".into(),
+                serde_json::Value::String(
+                    if has_replacement_history {
+                        "유"
+                    } else {
+                        "무"
+                    }
+                    .into(),
+                ),
+            );
+        }
+
+        for (json_key, field_prefix) in [
+            ("replacement_dates", "날짜"),
+            ("replacement_qtys", "교체수량"),
+            ("replacement_hosts", "호기"),
+        ] {
+            if let Some(values) = document_context
+                .get(json_key)
+                .and_then(|value| value.as_array())
+            {
+                for (idx, raw) in values.iter().take(6).enumerate() {
+                    if let Some(value) = snapshot_context_text(Some(raw)) {
+                        fields.insert(
+                            format!("{field_prefix}{}", idx + 1),
+                            serde_json::Value::String(value),
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    fields
+        .entry("수량".into())
+        .or_insert_with(|| serde_json::json!(1));
+    fields.insert(
+        "재고데이터기준".into(),
+        serde_json::Value::String("stock_in_out_monthly.json".into()),
+    );
+    if let Some(path) = snapshot_json_path {
+        fields.insert(
+            "재고스냅샷경로".into(),
+            serde_json::Value::String(path.to_string()),
+        );
+    }
+    fields.entry("구매사유".into()).or_insert_with(|| {
+        serde_json::Value::String(build_purchase_reason_from_snapshot(
+            &part_name,
+            current_stock,
+            required_stock,
+            movement_net_qty,
+            outbound_qty_sum,
+            outbound_count,
+            inventory_confirmed,
+        ))
+    });
+}
+
+fn build_guided_fields_for_purchase_request(
+    fields: &BTreeMap<String, serde_json::Value>,
+) -> Vec<GuidedFieldSpec> {
+    let has_replacement_history = fields
+        .get("교체내역 유무")
+        .and_then(|value| value.as_str())
+        .map(|value| value == "유")
+        .unwrap_or(false);
+    let is_over_500k = as_f64(fields.get("단가")).unwrap_or(0.0) >= 500_000.0;
+
+    let specs: &[(&str, &str, &str)] = match (is_over_500k, has_replacement_history) {
+        (true, true) => &[
+            (
+                "구매사유",
+                "구매 사유 보강",
+                "이 부품이 왜 지금 필요한지, 재고와 교체 이력을 근거로 정리해줘.",
+            ),
+            (
+                "담당자 직접입력",
+                "담당자 확인",
+                "이 문서를 검토하거나 설명할 담당자 정보를 정리해줘.",
+            ),
+            (
+                "납품업체",
+                "업체/거래처 확인",
+                "구매 예정 업체나 비교 가능한 공급업체 정보를 정리해줘.",
+            ),
+            (
+                "부품역할",
+                "부품 설명",
+                "이 부품의 기능과 현장 사용 목적을 문서 본문용으로 정리해줘.",
+            ),
+        ],
+        (true, false) => &[
+            (
+                "구매사유",
+                "구매 사유 보강",
+                "교체 이력은 적지만 구매가 필요한 이유를 재고 기준으로 정리해줘.",
+            ),
+            (
+                "담당자 직접입력",
+                "담당자 확인",
+                "문서 담당자 또는 설명 가능한 담당자를 정리해줘.",
+            ),
+            (
+                "납품업체",
+                "업체/거래처 확인",
+                "공급업체나 견적 대상 업체 정보를 정리해줘.",
+            ),
+            (
+                "부품역할",
+                "부품 설명",
+                "부품의 핵심 기능과 대체 불가능성을 짧게 정리해줘.",
+            ),
+        ],
+        (false, true) => &[
+            (
+                "구매사유",
+                "구매 사유",
+                "소액 구매 문서에 맞게 구매 필요성을 간단명료하게 정리해줘.",
+            ),
+            (
+                "담당자 직접입력",
+                "담당자 확인",
+                "담당자 이름이나 부서를 정리해줘.",
+            ),
+            (
+                "납품업체",
+                "업체/거래처 확인",
+                "현재 거래 예정 업체를 간단히 적어줘.",
+            ),
+            (
+                "부품역할",
+                "부품 설명",
+                "이 부품이 장비에서 하는 역할을 짧게 정리해줘.",
+            ),
+        ],
+        (false, false) => &[
+            (
+                "구매사유",
+                "구매 사유",
+                "이 부품이 왜 필요한지 핵심만 짧게 정리해줘.",
+            ),
+            (
+                "담당자 직접입력",
+                "담당자 확인",
+                "담당자 이름이나 부서를 정리해줘.",
+            ),
+            (
+                "납품업체",
+                "업체/거래처 확인",
+                "구매할 업체나 공급처를 정리해줘.",
+            ),
+            (
+                "부품역할",
+                "부품 설명",
+                "부품의 사용 목적을 한두 문장으로 정리해줘.",
+            ),
+        ],
+    };
+
+    specs
+        .iter()
+        .map(|(field, label, prompt)| GuidedFieldSpec {
+            field: (*field).to_string(),
+            label: (*label).to_string(),
+            prompt: (*prompt).to_string(),
+        })
+        .collect()
+}
+
+fn snapshot_context_number(value: &serde_json::Value) -> Option<f64> {
+    match value {
+        serde_json::Value::Number(number) => number.as_f64(),
+        serde_json::Value::String(text) => text.replace(',', "").trim().parse::<f64>().ok(),
+        _ => None,
+    }
+}
+
+fn snapshot_context_text(value: Option<&serde_json::Value>) -> Option<String> {
+    let raw = match value {
+        Some(serde_json::Value::String(text)) => text.trim().to_string(),
+        Some(serde_json::Value::Number(number)) => number.to_string(),
+        _ => return None,
+    };
+    if raw.is_empty() || matches!(raw.as_str(), "기록없음" | "출고기록없음" | "입고기록없음")
+    {
+        return None;
+    }
+    Some(raw)
+}
+
+fn part_current_stock(part: &serde_json::Value) -> Option<f64> {
+    part.get("current_stock_before")
+        .and_then(snapshot_context_number)
+}
+
+fn part_projected_stock_balance(part: &serde_json::Value) -> Option<f64> {
+    part.get("current_stock_updated")
+        .and_then(snapshot_context_number)
+        .or_else(|| part_current_stock(part).map(|current| current + part_movement_net_qty(part)))
+}
+
+fn part_required_stock(part: &serde_json::Value) -> Option<f64> {
+    part.get("required_stock")
+        .and_then(snapshot_context_number)
+        .or_else(|| {
+            part.get("document_context")
+                .and_then(|value| value.get("required_stock"))
+                .and_then(snapshot_context_number)
+        })
+}
+
+fn part_available_stock(part: &serde_json::Value) -> Option<f64> {
+    part.get("available_stock_qty")
+        .and_then(snapshot_context_number)
+}
+
+fn part_shortage_gap(part: &serde_json::Value) -> Option<f64> {
+    part.get("shortage_gap")
+        .and_then(snapshot_context_number)
+        .or_else(
+            || match (part_current_stock(part), part_required_stock(part)) {
+                (Some(current), Some(required)) => Some(current - required),
+                _ => None,
+            },
+        )
+}
+
+fn part_shortage_quantity(part: &serde_json::Value) -> Option<f64> {
+    part_shortage_gap(part).and_then(|gap| if gap < 0.0 { Some(-gap) } else { None })
+}
+
+fn part_movement_net_qty(part: &serde_json::Value) -> f64 {
+    part.get("movement_net_qty")
+        .and_then(snapshot_context_number)
+        .unwrap_or_else(|| {
+            part.get("inbound_qty_sum")
+                .and_then(snapshot_context_number)
+                .unwrap_or(0.0)
+                - part
+                    .get("outbound_qty_sum")
+                    .and_then(snapshot_context_number)
+                    .unwrap_or(0.0)
+        })
+}
+
+fn part_inventory_confirmed(part: &serde_json::Value) -> bool {
+    part.get("inventory_confirmed")
+        .and_then(|value| value.as_bool())
+        .unwrap_or_else(|| {
+            part.get("stock_row_idx")
+                .and_then(|value| value.as_array())
+                .map(|rows| !rows.is_empty())
+                .unwrap_or_else(|| part_current_stock(part).is_some())
+        })
+}
+
+fn part_inventory_match_status(part: &serde_json::Value) -> String {
+    if let Some(status) = part
+        .get("inventory_match_status")
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        return status.to_string();
+    }
+
+    let has_stock = part_inventory_confirmed(part);
+    let has_inbound = part
+        .get("inbound_row_idx")
+        .and_then(|value| value.as_array())
+        .map(|rows| !rows.is_empty())
+        .unwrap_or_else(|| {
+            part.get("inbound_qty_sum")
+                .and_then(snapshot_context_number)
+                .unwrap_or(0.0)
+                > 0.0
+        });
+    let has_outbound = part
+        .get("outbound_row_idx")
+        .and_then(|value| value.as_array())
+        .map(|rows| !rows.is_empty())
+        .unwrap_or_else(|| {
+            part.get("outbound_qty_sum")
+                .and_then(snapshot_context_number)
+                .unwrap_or(0.0)
+                > 0.0
+        });
+
+    match (has_stock, has_inbound, has_outbound) {
+        (true, true, true) => "matched_all",
+        (true, true, false) => "stock_inbound",
+        (true, false, true) => "stock_outbound",
+        (true, false, false) => "stock_only",
+        (false, true, true) => "movement_only",
+        (false, true, false) => "inbound_only",
+        (false, false, true) => "outbound_only",
+        (false, false, false) => "unclassified",
+    }
+    .to_string()
+}
+
+fn describe_inventory_match_status(status: &str) -> &'static str {
+    match status {
+        "matched_all" => "재고/입고/출고 모두 매칭",
+        "stock_inbound" => "재고/입고 매칭",
+        "stock_outbound" => "재고/출고 매칭",
+        "stock_only" => "재고만 매칭",
+        "movement_only" => "입출고만 매칭",
+        "inbound_only" => "입고만 매칭",
+        "outbound_only" => "출고만 매칭",
+        _ => "미분류",
+    }
+}
+
+fn describe_inventory_state(
+    current_stock: Option<f64>,
+    required_stock: Option<f64>,
+    inventory_confirmed: bool,
+) -> String {
+    if !inventory_confirmed {
+        return "재고 미확인".into();
+    }
+
+    let Some(current_stock) = current_stock else {
+        return "재고 미확인".into();
+    };
+
+    if current_stock <= 0.0 {
+        return "재고 없음".into();
+    }
+
+    if let Some(required_stock) = required_stock {
+        if current_stock < required_stock {
+            return "재고 부족".into();
+        }
+    }
+
+    "재고 확인".into()
+}
+
+fn set_optional_numeric_field(
+    fields: &mut BTreeMap<String, serde_json::Value>,
+    key: &str,
+    value: Option<f64>,
+) {
+    if let Some(value) = value {
+        fields.insert(key.to_string(), serde_json::json!(value));
+    } else {
+        fields.remove(key);
+    }
+}
+
+fn build_purchase_reason_from_snapshot(
+    part_name: &str,
+    current_stock: Option<f64>,
+    required_stock: Option<f64>,
+    movement_net_qty: f64,
+    outbound_qty_sum: f64,
+    outbound_count: u64,
+    inventory_confirmed: bool,
+) -> String {
+    if !inventory_confirmed {
+        return format!(
+            "{} 품목은 현재 재고파일에서 매칭되는 재고 행이 없어 현재고를 확정할 수 없습니다. 최근 3개년 출고 {:.0}개(출고 {}건), 이동 순증감 {:.0}개가 확인되어 재고 현황 재확인 후 구매 필요 여부를 검토해야 합니다.",
+            part_name, outbound_qty_sum, outbound_count, movement_net_qty
+        );
+    }
+
+    let current_stock = current_stock.unwrap_or(0.0);
+    if let Some(required_stock) = required_stock {
+        let shortage_gap = current_stock - required_stock;
+        format!(
+            "{} 품목은 재고파일 기준 현재고 {:.0}개, 필수재고 {:.0}개, 과부족 {:.0}개이며 최근 3개년 출고 {:.0}개(출고 {}건), 이동 순증감 {:.0}개가 확인되었습니다. 재고 부족 또는 소진으로 인한 설비 운영 차질 방지를 위해 구매 검토가 필요합니다.",
+            part_name,
+            current_stock,
+            required_stock,
+            shortage_gap,
+            outbound_qty_sum,
+            outbound_count,
+            movement_net_qty,
+        )
+    } else {
+        format!(
+            "{} 품목은 재고파일 기준 현재고 {:.0}개이며 최근 3개년 출고 {:.0}개(출고 {}건), 이동 순증감 {:.0}개가 확인되었습니다. 사용 이력과 재고 수준을 근거로 구매 필요 여부를 검토해야 합니다.",
+            part_name, current_stock, outbound_qty_sum, outbound_count, movement_net_qty
+        )
+    }
+}
+
+fn find_snapshot_part_for_document(
+    parts: &serde_json::Map<String, serde_json::Value>,
+    input: &str,
+    fields: &BTreeMap<String, serde_json::Value>,
+) -> Option<serde_json::Value> {
+    let part_name = meaningful_lookup_text(fields.get("품명"));
+    let part_no = meaningful_lookup_text(fields.get("품번"));
+    if let Some(found) =
+        score_snapshot_part_candidates(parts, part_name.as_deref(), part_no.as_deref(), None)
+    {
+        return Some(found);
+    }
+
+    let normalized_input = normalize_lookup_text(input);
+    if normalized_input.len() < 2 {
+        return None;
+    }
+
+    score_snapshot_part_candidates(parts, None, None, Some(&normalized_input))
+}
+
+fn meaningful_lookup_text(value: Option<&serde_json::Value>) -> Option<String> {
+    let raw = match value {
+        Some(serde_json::Value::String(s)) => s.trim().to_string(),
+        Some(serde_json::Value::Number(n)) => n.to_string(),
+        _ => return None,
+    };
+    if raw.is_empty() {
+        return None;
+    }
+    let normalized = normalize_lookup_text(&raw);
+    if normalized.is_empty() {
+        return None;
+    }
+    if matches!(
+        normalized.as_str(),
+        "미입력" | "직접입력" | "기록없음" | "출고기록없음" | "입고기록없음"
+    ) {
+        return None;
+    }
+    Some(raw)
+}
+
+fn score_snapshot_part_candidates(
+    parts: &serde_json::Map<String, serde_json::Value>,
+    part_name: Option<&str>,
+    part_no: Option<&str>,
+    normalized_input: Option<&str>,
+) -> Option<serde_json::Value> {
+    let name_needle = part_name.map(normalize_lookup_text);
+    let no_needle = part_no.map(normalize_lookup_text);
+    let mut best_score = 0usize;
+    let mut best_value: Option<serde_json::Value> = None;
+
+    for value in parts.values() {
+        let candidate_name = value
+            .get("part_name")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        let candidate_no = value.get("part_no").and_then(|v| v.as_str()).unwrap_or("");
+        let normalized_name = normalize_lookup_text(candidate_name);
+        let normalized_no = normalize_lookup_text(candidate_no);
+        if normalized_name.is_empty() && normalized_no.is_empty() {
+            continue;
+        }
+
+        let mut score = 0usize;
+        if let Some(needle) = &no_needle {
+            if normalized_no == *needle {
+                score = score.max(10_000 + normalized_no.len());
+            } else if normalized_no.contains(needle) || needle.contains(&normalized_no) {
+                score = score.max(8_000 + needle.len());
+            }
+        }
+        if let Some(needle) = &name_needle {
+            if normalized_name == *needle {
+                score = score.max(9_000 + normalized_name.len());
+            } else if normalized_name.contains(needle) || needle.contains(&normalized_name) {
+                score = score.max(7_000 + needle.len());
+            }
+        }
+        if let Some(input) = normalized_input {
+            if !normalized_no.is_empty() && input.contains(&normalized_no) {
+                score = score.max(6_000 + normalized_no.len());
+            }
+            if !normalized_name.is_empty() && input.contains(&normalized_name) {
+                score = score.max(5_000 + normalized_name.len());
+            }
+            if input.len() >= 4 && !normalized_no.is_empty() && normalized_no.contains(input) {
+                score = score.max(3_000 + input.len());
+            }
+            if input.len() >= 4 && !normalized_name.is_empty() && normalized_name.contains(input) {
+                score = score.max(2_000 + input.len());
+            }
+        }
+
+        if score > best_score {
+            best_score = score;
+            best_value = Some(value.clone());
+        }
+    }
+
+    best_value
+}
+
 fn find_latest_snapshot_json(workdir: &Path) -> Option<PathBuf> {
     let direct = workdir.join("output").join("stock_in_out_monthly.json");
     if direct.exists() {
@@ -1680,14 +2440,15 @@ fn build_shortage_item(part: &serde_json::Value) -> Option<LegacyShortageItem> {
         .unwrap_or(&part_name)
         .trim()
         .to_string();
-    let current_stock_before = part
-        .get("current_stock_before")
-        .and_then(|value| value.as_f64())
-        .unwrap_or(0.0);
-    let current_stock_updated = part
-        .get("current_stock_updated")
-        .and_then(|value| value.as_f64())
-        .unwrap_or(current_stock_before);
+    let current_stock = part_current_stock(part);
+    let required_stock = part_required_stock(part);
+    let available_stock = part_available_stock(part);
+    let shortage_gap = part_shortage_gap(part);
+    let shortage_quantity = part_shortage_quantity(part);
+    let projected_stock_balance = part_projected_stock_balance(part);
+    let movement_net_qty = part_movement_net_qty(part);
+    let inventory_confirmed = part_inventory_confirmed(part);
+    let inventory_match_status = part_inventory_match_status(part);
     let inbound_qty_sum = part
         .get("inbound_qty_sum")
         .and_then(|value| value.as_f64())
@@ -1701,33 +2462,176 @@ fn build_shortage_item(part: &serde_json::Value) -> Option<LegacyShortageItem> {
         .and_then(|value| value.as_u64())
         .unwrap_or(0) as usize;
 
-    if current_stock_updated > 0.0 && current_stock_before > 0.0 {
+    if !inventory_confirmed {
         return None;
     }
 
-    let stock_status = if current_stock_updated <= 0.0 {
-        "재고 없음".to_string()
-    } else {
-        "재고 부족".to_string()
+    let current_value = current_stock?;
+    let is_shortage = current_value <= 0.0
+        || shortage_gap.map(|value| value < 0.0).unwrap_or(false)
+        || required_stock
+            .map(|required| current_value < required)
+            .unwrap_or(false);
+    if !is_shortage {
+        return None;
+    }
+
+    let stock_status = describe_inventory_state(current_stock, required_stock, inventory_confirmed);
+    let summary = match (required_stock, shortage_quantity) {
+        (Some(required_stock), Some(shortage_quantity)) => format!(
+            "{} ({})는 재고파일 기준 현재고 {:.0}개, 필수재고 {:.0}개라서 {:.0}개가 부족한 상태입니다. 최근 3개년 이동 순증감은 {:.0}개입니다.",
+            part_name, part_no, current_value, required_stock, shortage_quantity, movement_net_qty
+        ),
+        (Some(required_stock), None) => format!(
+            "{} ({})는 재고파일 기준 현재고 {:.0}개, 필수재고 {:.0}개이며 구매 검토가 필요한 상태입니다. 최근 3개년 이동 순증감은 {:.0}개입니다.",
+            part_name, part_no, current_value, required_stock, movement_net_qty
+        ),
+        (None, _) => format!(
+            "{} ({})는 재고파일 기준 현재고 {:.0}개이며 최근 3개년 출고합계 {:.0}개, 이동 순증감 {:.0}개가 확인되어 구매 검토가 필요한 상태입니다.",
+            part_name, part_no, current_value, outbound_qty_sum, movement_net_qty
+        ),
     };
-    let summary = format!(
-        "{} ({})는 현재고 {:.0}, 업데이트 현재고 {:.0}, 출고합계 {:.0}로 구매 검토가 필요한 상태입니다.",
-        part_name, part_no, current_stock_before, current_stock_updated, outbound_qty_sum
-    );
     let document_request_hint = format!("{part_name} ({part_no}) 품목으로 구매 품의 문서 작성해줘");
 
     Some(LegacyShortageItem {
         part_name,
         part_no,
-        current_stock_before,
-        current_stock_updated,
+        current_stock,
+        required_stock,
+        available_stock,
+        shortage_gap,
+        shortage_quantity,
+        projected_stock_balance,
+        movement_net_qty,
         inbound_qty_sum,
         outbound_qty_sum,
         outbound_count,
+        inventory_confirmed,
+        inventory_match_status,
         stock_status,
         summary,
         document_request_hint,
     })
+}
+
+fn build_unverified_shortage_item(part: &serde_json::Value) -> Option<LegacyShortageItem> {
+    let part_name = part.get("part_name")?.as_str()?.trim().to_string();
+    let part_no = part
+        .get("part_no")
+        .and_then(|value| value.as_str())
+        .unwrap_or(&part_name)
+        .trim()
+        .to_string();
+    let inventory_confirmed = part_inventory_confirmed(part);
+    if inventory_confirmed {
+        return None;
+    }
+
+    let inbound_qty_sum = part
+        .get("inbound_qty_sum")
+        .and_then(|value| value.as_f64())
+        .unwrap_or(0.0);
+    let outbound_qty_sum = part
+        .get("outbound_qty_sum")
+        .and_then(|value| value.as_f64())
+        .unwrap_or(0.0);
+    let outbound_count = part
+        .get("outbound_count")
+        .and_then(|value| value.as_u64())
+        .unwrap_or(0) as usize;
+    let movement_net_qty = part_movement_net_qty(part);
+    if outbound_qty_sum <= 0.0 && outbound_count == 0 && movement_net_qty >= 0.0 {
+        return None;
+    }
+
+    let inventory_match_status = part_inventory_match_status(part);
+    let summary = format!(
+        "{} ({})는 재고파일과 매칭되는 재고 행이 없어 현재고를 확정할 수 없습니다. 최근 3개년 입고 {:.0}, 출고 {:.0} (출고 {}건), 이동 순증감 {:.0}이 확인되어 재고 현황 재확인이 필요합니다.",
+        part_name, part_no, inbound_qty_sum, outbound_qty_sum, outbound_count, movement_net_qty
+    );
+    let document_request_hint = format!(
+        "{part_name} ({part_no}) 품목은 재고 미확인 상태라 스냅샷과 원본 재고 매핑부터 확인해줘"
+    );
+
+    Some(LegacyShortageItem {
+        part_name,
+        part_no,
+        current_stock: None,
+        required_stock: part_required_stock(part),
+        available_stock: part_available_stock(part),
+        shortage_gap: part_shortage_gap(part),
+        shortage_quantity: part_shortage_quantity(part),
+        projected_stock_balance: part_projected_stock_balance(part),
+        movement_net_qty,
+        inbound_qty_sum,
+        outbound_qty_sum,
+        outbound_count,
+        inventory_confirmed: false,
+        inventory_match_status,
+        stock_status: "재고 미확인".into(),
+        summary,
+        document_request_hint,
+    })
+}
+
+fn build_confirmed_shortage_markdown_table(items: &[LegacyShortageItem]) -> String {
+    if items.is_empty() {
+        return "해당 조건에 맞는 재고 부족 품목이 없습니다.".into();
+    }
+
+    let mut lines = vec![
+        "| 품목명 | 품번 | 현재고 | 필수재고 | 부족수량 | 상태 |".to_string(),
+        "| --- | --- | ---: | ---: | ---: | --- |".to_string(),
+    ];
+
+    for item in items {
+        lines.push(format!(
+            "| {} | {} | {} | {} | {} | {} |",
+            escape_markdown_table_cell(&item.part_name),
+            escape_markdown_table_cell(&item.part_no),
+            format_count(item.current_stock),
+            format_count(item.required_stock),
+            format_count(item.shortage_quantity),
+            escape_markdown_table_cell(&item.stock_status),
+        ));
+    }
+
+    lines.join("\n")
+}
+
+fn build_unverified_shortage_markdown_table(items: &[LegacyShortageItem]) -> Option<String> {
+    if items.is_empty() {
+        return None;
+    }
+
+    let mut lines = vec![
+        "| 품목명 | 품번 | 최근 출고합계 | 이동 순증감 | 상태 |".to_string(),
+        "| --- | --- | ---: | ---: | --- |".to_string(),
+    ];
+
+    for item in items {
+        lines.push(format!(
+            "| {} | {} | {} | {} | {} |",
+            escape_markdown_table_cell(&item.part_name),
+            escape_markdown_table_cell(&item.part_no),
+            format_count(Some(item.outbound_qty_sum)),
+            format_count(Some(item.movement_net_qty)),
+            escape_markdown_table_cell(&item.stock_status),
+        ));
+    }
+
+    Some(lines.join("\n"))
+}
+
+fn escape_markdown_table_cell(value: &str) -> String {
+    value.replace('|', "\\|").replace('\n', " ")
+}
+
+fn format_count(value: Option<f64>) -> String {
+    match value {
+        Some(value) => format!("{value:.0}"),
+        None => "-".into(),
+    }
 }
 
 fn resolve_snapshot_part(
@@ -1741,33 +2645,33 @@ fn resolve_snapshot_part(
         .and_then(|value| value.as_object())
         .ok_or_else(|| AppError::bad_request("invalid snapshot format: parts missing".into()))?;
 
-    let name_needle = part_name.map(normalize_lookup_text);
-    let no_needle = part_no.map(normalize_lookup_text);
+    score_snapshot_part_candidates(parts, part_name, part_no, None).ok_or_else(|| {
+        AppError::bad_request("requested part was not found in the latest snapshot".into())
+    })
+}
 
-    for value in parts.values() {
-        let name = value
-            .get("part_name")
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
-        let no = value.get("part_no").and_then(|v| v.as_str()).unwrap_or("");
-        let normalized_name = normalize_lookup_text(name);
-        let normalized_no = normalize_lookup_text(no);
-        let name_match = name_needle
-            .as_ref()
-            .map(|needle| normalized_name.contains(needle))
-            .unwrap_or(false);
-        let no_match = no_needle
-            .as_ref()
-            .map(|needle| normalized_no.contains(needle))
-            .unwrap_or(false);
-        if (name_needle.is_some() && name_match) || (no_needle.is_some() && no_match) {
-            return Ok(value.clone());
-        }
-    }
+fn resolve_snapshot_part_for_document(
+    state: &AppState,
+    fields: &BTreeMap<String, serde_json::Value>,
+    part_name: Option<&str>,
+    part_no: Option<&str>,
+) -> Result<serde_json::Value, AppError> {
+    let explicit_part_name = part_name.map(|value| value.to_string()).or_else(|| {
+        fields
+            .get("품명")
+            .and_then(|value| meaningful_lookup_text(Some(value)))
+    });
+    let explicit_part_no = part_no.map(|value| value.to_string()).or_else(|| {
+        fields
+            .get("품번")
+            .and_then(|value| meaningful_lookup_text(Some(value)))
+    });
 
-    Err(AppError::bad_request(
-        "requested part was not found in the latest snapshot".into(),
-    ))
+    resolve_snapshot_part(
+        state,
+        explicit_part_name.as_deref(),
+        explicit_part_no.as_deref(),
+    )
 }
 
 fn normalize_lookup_text(input: &str) -> String {
@@ -1876,7 +2780,7 @@ mod tests {
             .uri("/document/create")
             .header("content-type", "application/json")
             .body(Body::from(
-                r#"{"template_id":"purchase_request","input_text":"구매 품의서 만들어줘, SSD 3개"}"#,
+                r#"{"template_id":"purchase_request","input_text":"품명: __UNIT_TEST_UNMATCHED_PART__\n수량: 3"}"#,
             ))
             .unwrap();
 
@@ -1890,13 +2794,18 @@ mod tests {
 
         assert_eq!(
             payload.updated_fields.get("품명"),
-            Some(&serde_json::Value::String("SSD".into()))
+            Some(&serde_json::Value::String(
+                "__UNIT_TEST_UNMATCHED_PART__".into()
+            ))
         );
         assert_eq!(
             payload.updated_fields.get("수량"),
             Some(&serde_json::Value::Number(3_u64.into()))
         );
-        assert_eq!(payload.missing_fields, vec!["납품업체"]);
+        assert_eq!(
+            payload.missing_fields,
+            vec!["납품업체", "구매사유", "담당자 직접입력", "부품역할"]
+        );
         assert_eq!(
             payload.next_question.as_deref(),
             Some("납품업체는 어디로 할까?")
@@ -1911,7 +2820,7 @@ mod tests {
             .uri("/document/create")
             .header("content-type", "application/json")
             .body(Body::from(
-                r#"{"template_id":"purchase_request","input_text":"SSD 3개 구매 요청"}"#,
+                r#"{"template_id":"purchase_request","input_text":"품명: __UNIT_TEST_UNMATCHED_PART_TWO__\n수량: 3"}"#,
             ))
             .unwrap();
 
@@ -1943,11 +2852,223 @@ mod tests {
             .unwrap();
         let payload: FillResponse = serde_json::from_slice(&body).unwrap();
 
-        assert!(payload.missing_fields.is_empty());
-        assert_eq!(payload.next_question, None);
+        assert_eq!(
+            payload.missing_fields,
+            vec!["구매사유", "담당자 직접입력", "부품역할"]
+        );
+        assert_eq!(
+            payload.next_question.as_deref(),
+            Some("구매사유는 어떻게 적을까요? 재고 부족, 설비 중단 위험, 사용 이력 중 확인된 근거를 알려주세요.")
+        );
         assert_eq!(
             payload.updated_fields.get("납품업체"),
             Some(&serde_json::Value::String("하이닉스야".into()))
         );
+    }
+
+    #[test]
+    fn merge_snapshot_part_into_fields_overwrites_inventory_fields() {
+        let part = serde_json::json!({
+            "part_name": "AUTO PART",
+            "part_no": "AUTO-001",
+            "current_stock_before": 12.0,
+            "current_stock_updated": 4.0,
+            "required_stock": 8.0,
+            "available_stock_qty": 10.0,
+            "shortage_gap": 4.0,
+            "movement_net_qty": -8.0,
+            "inventory_confirmed": true,
+            "inventory_match_status": "matched_all",
+            "inbound_qty_sum": 3.0,
+            "outbound_qty_sum": 11.0,
+            "outbound_count": 2,
+            "inbound_dates": ["2026-04-01"],
+            "outbound_dates": ["2026-04-10", "2026-04-20"],
+            "document_context": {
+                "received_date": "2026-03-28",
+                "used_date_last": "2026-04-21",
+                "used_where": "1호기",
+                "usage_reason": "베어링 마모",
+                "replacement_reason": "예방 교체",
+                "required_stock": 8.0,
+                "issued_qty": "11",
+                "replacement_dates": ["2026-04-01", "", "2026-04-10", "", "", ""],
+                "replacement_qtys": ["1", "", "2", "", "", ""],
+                "replacement_hosts": ["A라인", "", "B라인", "", "", ""],
+                "vendor_name": "지정 협력사",
+                "manufacturer_name": "OEM",
+                "unit": "EA",
+                "unit_price": 125000.0,
+                "has_replacement_history": true
+            }
+        });
+        let mut fields = BTreeMap::new();
+        fields.insert("품명".into(), serde_json::Value::String("수기값".into()));
+        fields.insert("현재고".into(), serde_json::json!(999.0));
+
+        merge_snapshot_part_into_fields(
+            &mut fields,
+            &part,
+            Some("/tmp/output/stock_in_out_monthly.json"),
+        );
+
+        assert_eq!(
+            fields.get("품명"),
+            Some(&serde_json::Value::String("AUTO PART".into()))
+        );
+        assert_eq!(
+            fields.get("품번"),
+            Some(&serde_json::Value::String("AUTO-001".into()))
+        );
+        assert_eq!(fields.get("현재고"), Some(&serde_json::json!(12.0)));
+        assert_eq!(fields.get("필수재고량"), Some(&serde_json::json!(8.0)));
+        assert_eq!(fields.get("가용재고량"), Some(&serde_json::json!(10.0)));
+        assert_eq!(fields.get("과부족"), Some(&serde_json::json!(4.0)));
+        assert_eq!(fields.get("이동순증감"), Some(&serde_json::json!(-8.0)));
+        assert_eq!(fields.get("추정잔량"), Some(&serde_json::json!(4.0)));
+        assert_eq!(
+            fields.get("재고확인상태"),
+            Some(&serde_json::Value::String("확인".into()))
+        );
+        assert_eq!(
+            fields.get("재고매칭상태"),
+            Some(&serde_json::Value::String(
+                "재고/입고/출고 모두 매칭".into()
+            ))
+        );
+        assert_eq!(fields.get("총 교체수량"), Some(&serde_json::json!(11)));
+        assert_eq!(
+            fields.get("교체내역 유무"),
+            Some(&serde_json::Value::String("유".into()))
+        );
+        assert_eq!(
+            fields.get("입고일"),
+            Some(&serde_json::Value::String("2026-03-28".into()))
+        );
+        assert_eq!(
+            fields.get("사용일"),
+            Some(&serde_json::Value::String("2026-04-21".into()))
+        );
+        assert_eq!(
+            fields.get("재고데이터기준"),
+            Some(&serde_json::Value::String(
+                "stock_in_out_monthly.json".into()
+            ))
+        );
+        assert_eq!(
+            fields.get("납품업체"),
+            Some(&serde_json::Value::String("지정 협력사".into()))
+        );
+        assert_eq!(
+            fields.get("제조사"),
+            Some(&serde_json::Value::String("OEM".into()))
+        );
+        assert_eq!(fields.get("단가"), Some(&serde_json::json!(125000.0)));
+        assert_eq!(
+            fields.get("사용처"),
+            Some(&serde_json::Value::String("1호기".into()))
+        );
+        assert_eq!(
+            fields.get("문제점"),
+            Some(&serde_json::Value::String("베어링 마모".into()))
+        );
+        assert_eq!(
+            fields.get("교체사유"),
+            Some(&serde_json::Value::String("예방 교체".into()))
+        );
+        assert_eq!(
+            fields.get("날짜1"),
+            Some(&serde_json::Value::String("2026-04-01".into()))
+        );
+        assert_eq!(
+            fields.get("교체수량3"),
+            Some(&serde_json::Value::String("2".into()))
+        );
+        assert_eq!(
+            fields.get("호기3"),
+            Some(&serde_json::Value::String("B라인".into()))
+        );
+        assert_eq!(
+            fields.get("재고스냅샷경로"),
+            Some(&serde_json::Value::String(
+                "/tmp/output/stock_in_out_monthly.json".into()
+            ))
+        );
+    }
+
+    #[test]
+    fn build_shortage_item_uses_confirmed_stock_values() {
+        let part = serde_json::json!({
+            "part_name": "TEST PART",
+            "part_no": "TP-001",
+            "current_stock_before": 2.0,
+            "current_stock_updated": -3.0,
+            "required_stock": 5.0,
+            "available_stock_qty": 2.0,
+            "shortage_gap": -3.0,
+            "movement_net_qty": -5.0,
+            "inventory_confirmed": true,
+            "inventory_match_status": "matched_all",
+            "inbound_qty_sum": 1.0,
+            "outbound_qty_sum": 6.0,
+            "outbound_count": 2
+        });
+
+        let item = build_shortage_item(&part).expect("expected confirmed shortage item");
+        assert_eq!(item.current_stock, Some(2.0));
+        assert_eq!(item.required_stock, Some(5.0));
+        assert_eq!(item.shortage_gap, Some(-3.0));
+        assert_eq!(item.shortage_quantity, Some(3.0));
+        assert!(item.inventory_confirmed);
+        assert_eq!(item.stock_status, "재고 부족");
+        assert!(item.summary.contains("3개가 부족한 상태"));
+    }
+
+    #[test]
+    fn build_unverified_shortage_item_separates_missing_inventory_match() {
+        let part = serde_json::json!({
+            "part_name": "OUTBOUND ONLY",
+            "part_no": "OB-001",
+            "movement_net_qty": -12.0,
+            "inventory_confirmed": false,
+            "inventory_match_status": "outbound_only",
+            "inbound_qty_sum": 0.0,
+            "outbound_qty_sum": 12.0,
+            "outbound_count": 3
+        });
+
+        let item =
+            build_unverified_shortage_item(&part).expect("expected unverified shortage item");
+        assert_eq!(item.current_stock, None);
+        assert!(!item.inventory_confirmed);
+        assert_eq!(item.stock_status, "재고 미확인");
+        assert_eq!(item.inventory_match_status, "outbound_only");
+        assert_eq!(item.shortage_quantity, None);
+    }
+
+    #[test]
+    fn build_confirmed_shortage_markdown_table_renders_markdown_rows() {
+        let table = build_confirmed_shortage_markdown_table(&[LegacyShortageItem {
+            part_name: "TEST FILTER".into(),
+            part_no: "TF-001".into(),
+            current_stock: Some(1.0),
+            required_stock: Some(11.0),
+            available_stock: Some(1.0),
+            shortage_gap: Some(-10.0),
+            shortage_quantity: Some(10.0),
+            projected_stock_balance: Some(-4.0),
+            movement_net_qty: -5.0,
+            inbound_qty_sum: 0.0,
+            outbound_qty_sum: 5.0,
+            outbound_count: 2,
+            inventory_confirmed: true,
+            inventory_match_status: "matched_all".into(),
+            stock_status: "재고 부족".into(),
+            summary: "현재고 1개, 필수재고 11개라서 10개가 부족한 상태입니다.".into(),
+            document_request_hint: "TEST FILTER 문서 작성".into(),
+        }]);
+
+        assert!(table.contains("| 품목명 | 품번 | 현재고 | 필수재고 | 부족수량 | 상태 |"));
+        assert!(table.contains("| TEST FILTER | TF-001 | 1 | 11 | 10 | 재고 부족 |"));
     }
 }

@@ -24,9 +24,38 @@ User -> Open WebUI -> vLLM
 - `POST /document/create`
 - `POST /document/fill`
 - `POST /document/export`
+- `GET /document/legacy/shortages`
+- `GET /document/legacy/item-context`
+- `POST /document/legacy/item-export`
+- `POST /document/legacy/item-approve`
+- `POST /document/legacy/run`
 - `POST /parser/to-md`
 - `POST /document/fill-fields`
 - `POST /search/query`
+
+## Legacy Stock Snapshot Rules
+
+Rust 레거시 문서 작성기는 `rust-service/DB/output/stock_in_out_monthly.json` 스냅샷을 기준으로 동작합니다.
+
+- 원천 Excel(`입고/재고/출고`)은 배치 시 JSON 스냅샷 생성에만 사용합니다.
+- 문서 `create/fill/export`와 품목 컨텍스트 조회는 원천 Excel을 직접 현재 조회 기준으로 사용하지 않습니다.
+- `현재고`는 재고 파일 원값(`current_stock_before`)만 사용합니다.
+- `movement_net_qty`와 `current_stock_updated`는 이동 이력/추정 잔량용 보조 값으로 유지되며, 실제 현재고 표시값으로 쓰지 않습니다.
+- 재고 행이 없는 품목은 `inventory_confirmed=false`와 `inventory_match_status`로 분리되어 `재고 미확인`으로 취급합니다.
+
+부족재고 조회 응답 기준:
+
+- 확인된 부족 품목은 `현재고`, `필수재고`, `부족수량(shortage_quantity)` 기준으로 정렬/설명합니다.
+- `shortage_gap`는 내부 계산 필드로 남기되, 사용자 응답은 `현재고 X개, 필수재고 Y개로 Z개 부족` 형식으로 설명합니다.
+- `/document/legacy/shortages` 응답에는 Open WebUI가 그대로 사용할 수 있는 `markdown_table`와 `unverified_markdown_table`가 포함됩니다.
+
+배치 재생성:
+
+```bash
+curl -X POST http://127.0.0.1:8001/document/legacy/run \
+  -H 'Content-Type: application/json' \
+  -d '{"force": true}'
+```
 
 ## Local Run
 
@@ -35,6 +64,13 @@ Rust service:
 ```bash
 cd rust-service
 DOCUMENT_SERVICE_HOST=0.0.0.0 DOCUMENT_SERVICE_PORT=8001 cargo run
+```
+
+테스트:
+
+```bash
+PATH='/home/elise/.rustup/toolchains/stable-x86_64-unknown-linux-gnu/bin':$PATH \
+cargo test --manifest-path Cargo.toml
 ```
 
 Python service:
