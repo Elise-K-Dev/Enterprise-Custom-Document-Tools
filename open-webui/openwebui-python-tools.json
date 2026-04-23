@@ -1,0 +1,27 @@
+[
+  {
+    "type": "openapi",
+    "url": "http://parser-service:8002",
+    "spec_type": "url",
+    "path": "/openapi.json",
+    "auth_type": "none",
+    "headers": null,
+    "key": "",
+    "info": {
+      "id": "document_search",
+      "name": "Python 문서 검색",
+      "description": "전처리된 문서를 검색해 권한에 맞는 근거와 답변을 반환합니다."
+    },
+    "config": {
+      "enable": true,
+      "function_name_filter_list": "search_documents_by_rank",
+      "access_grants": [
+        {
+          "principal_type": "user",
+          "principal_id": "*",
+          "permission": "read"
+        }
+      ]
+    }
+  }
+]

@@ -1,0 +1,73 @@
+services:
+  open-webui:
+    image: ${OPEN_WEBUI_IMAGE:-open-webui-vllm-local}
+    env_file:
+      - ./open-webui/.env.openwebui
+    ports:
+      - "3000:8080"
+    volumes:
+      - open-webui-data:/app/backend/data
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      document-service:
+        condition: service_started
+      parser-service:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "--silent", "--fail", "http://127.0.0.1:8080/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+    networks:
+      - port-project
+
+  document-service:
+    build:
+      context: ./rust-service
+      dockerfile: Dockerfile
+    environment:
+      DOCUMENT_SERVICE_HOST: 0.0.0.0
+      DOCUMENT_SERVICE_PORT: 8001
+      DOCUMENT_SERVICE_PUBLIC_BASE_URL: http://127.0.0.1:8001
+      PORT_PROJECT_TEMPLATE_DIR: /app/templates
+      PORT_PROJECT_LEGACY_WORKDIR: /app/DB
+    ports:
+      - "8001:8001"
+    volumes:
+      - ./rust-service/DB:/app/DB
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    networks:
+      - port-project
+
+  parser-service:
+    build:
+      context: ./python-service
+      dockerfile: Dockerfile
+    environment:
+      PARSER_SERVICE_HOST: 0.0.0.0
+      PARSER_SERVICE_PORT: 8002
+      DOCUMENT_FILLER_API_URL: http://192.168.100.13:8000/v1/chat/completions
+      DOCUMENT_FILLER_MODEL_ID: gemma-4-31b-it
+      LEGACY_MD_INDEXER_DIR: /app/legacy-md-indexer-main
+    ports:
+      - "8002:8002"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8002/health')"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    networks:
+      - port-project
+
+networks:
+  port-project:
+    name: port-project
+
+volumes:
+  open-webui-data:
