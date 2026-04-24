@@ -5,12 +5,14 @@ Open WebUI를 프런트로 두고, 구매 품의서와 재고 업무는 Rust 서
 ## Overview
 
 ```text
-User -> Open WebUI -> vLLM
-                    -> Tool Calls
-                       -> Rust Service   (:8001 /document/create, /document/fill, /document/export)
-                       -> Python Service (:8002 /parser/to-md, /document/fill-fields, /search/query)
-                       -> Markdown PDF   (:8003 /render/markdown-pdf)
+LAN User -> Open WebUI (:3000) -> vLLM Model API
+                              -> Tool Calls on the same host
+                                 -> http://127.0.0.1:8001 Rust Service
+                                 -> http://127.0.0.1:8002 Python Search/Parser
+                                 -> http://127.0.0.1:8003 Markdown Renderer
 ```
+
+개발 표준 실행은 `docker-compose.host.yml` 오버레이를 함께 사용합니다. 따라서 Open WebUI가 등록해 호출하는 도구 URL은 컨테이너 서비스명(`document-service`, `parser-service`)이 아니라 실행 기기 기준 `127.0.0.1`입니다. 기본 `docker-compose.yml`만 단독 실행할 때만 Docker bridge 네트워크의 서비스명을 사용할 수 있습니다.
 
 구성 요소:
 
@@ -128,6 +130,7 @@ bash scripts/start_openwebui_with_vllm.sh
 - `scripts/start_openwebui_with_vllm.sh`는 Open WebUI 이미지를 빌드하고, Rust/Python/Markdown PDF 서비스 이미지를 로컬에서 빌드한 뒤 `docker-compose.yml`과 `docker-compose.host.yml`을 함께 사용해 기동합니다.
 - Docker Hub metadata/DNS 지연을 줄이기 위해 서비스 이미지는 `python:3.11-slim`, `rust:1.95`, `debian:bookworm-slim`을 로컬 alias 이미지로 태그한 뒤 `--pull=false`로 빌드합니다.
 - `docker-compose.host.yml`을 함께 쓰면 도구 서버들은 실행 기기 기준 `127.0.0.1:8001`, `127.0.0.1:8002`, `127.0.0.1:8003`으로 Open WebUI에 등록됩니다.
+- `vLLM` 모델 API는 도구 서버가 아니며 고정 주소 `http://192.168.100.13:8000/v1`로 호출합니다.
 - `document-service`는 `./rust-service/DB`를 `/app/DB`로 마운트하고 구매 품의서, 재고 조회, 다운로드 프록시를 처리합니다.
 - `parser-service`는 레거시 검색용 Python 서비스를 함께 기동합니다.
 - `markdown-pdf-service`는 Markdown 보고서 PDF, Word DOCX, Excel XLSX를 생성하고 `./markdown-pdf-service/output`에 저장합니다.
@@ -142,6 +145,14 @@ docker compose up -d --build
 다만 현재 개발 표준은 host overlay를 포함한 시작 스크립트입니다. 직접 실행할 경우 Open WebUI 런타임 동기화를 별도로 수행해야 합니다.
 
 ```bash
+bash scripts/sync_openwebui_runtime.sh
+```
+
+기본 compose만 단독으로 사용하는 경우에는 Open WebUI 도구 URL도 bridge 네트워크 기준으로 다시 맞춰야 합니다.
+
+```bash
+RUST_TOOL_SERVER_URL=http://document-service:8001 \
+PARSER_TOOL_SERVER_URL=http://parser-service:8002 \
 bash scripts/sync_openwebui_runtime.sh
 ```
 
