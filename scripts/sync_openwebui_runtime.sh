@@ -425,7 +425,7 @@ def sync_tool_servers() -> None:
             "key": "",
             "info": {
                 "id": "document_search",
-                "name": "Python 파서/검색 도구",
+                "name": "데이터 기반 검색기",
                 "description": "전처리된 내부 문서, 업무보고 원문, 수리 이력, 날짜별 작업 기록을 검색해 권한에 맞는 근거와 답변을 반환합니다. PDF 생성이나 구매 품의서 생성에는 사용하지 않습니다.",
             },
             "config": {

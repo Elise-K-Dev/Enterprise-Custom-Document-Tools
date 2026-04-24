@@ -66,6 +66,17 @@ prepare_output_dir() {
   chmod 0775 "${output_dir}" 2>/dev/null || true
 }
 
+repair_bind_mount_permissions() {
+  local target_dir="$1"
+
+  mkdir -p "${target_dir}"
+  "${DOCKER_BIN}" run --rm \
+    -v "${target_dir}:/target" \
+    "port-project-base-debian:bookworm-slim" \
+    sh -lc 'chown -R 1000:1000 /target && chmod -R u+rwX,g+rwX /target' \
+    >/dev/null
+}
+
 if [[ ! -f "${PROJECT_ENV_FILE}" ]] || ! grep -q '^PORT_PROJECT_INTERNAL_TOKEN=' "${PROJECT_ENV_FILE}"; then
   mkdir -p "$(dirname "${PROJECT_ENV_FILE}")"
   TOKEN="$(python3 - <<'PY'
@@ -94,6 +105,9 @@ ensure_local_image "debian:bookworm-slim" "port-project-base-debian:bookworm-sli
 echo "[INFO] Preparing writable output directories..."
 prepare_output_dir "${ROOT_DIR}/Port-Project/python-service/output"
 prepare_output_dir "${ROOT_DIR}/Port-Project/markdown-pdf-service/output"
+repair_bind_mount_permissions "${ROOT_DIR}/Port-Project/rust-service/DB/output"
+repair_bind_mount_permissions "${ROOT_DIR}/Port-Project/python-service/output"
+repair_bind_mount_permissions "${ROOT_DIR}/Port-Project/markdown-pdf-service/output"
 
 cd "${OPEN_WEBUI_DIR}"
 
