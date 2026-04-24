@@ -1,15 +1,17 @@
 # Enterprise Custom Document Tools
 
-Open WebUI를 프런트로 두고, 구매 품의서와 재고 업무는 Rust 서비스에, 문서 검색과 파싱은 Python 서비스에, 범용 보고서 PDF 렌더링은 Markdown PDF 서비스에 분리한 사내 문서 자동화 워크스페이스입니다.
+Open WebUI를 프런트로 두고, 도구는 `Python 파서/검색 도구`와 `통합 문서 제작기` 두 축으로 구성한 사내 문서 자동화 워크스페이스입니다. 통합 문서 제작기는 Rust 기반 구매 품의문 작성기와 Markdown PDF/Word/Excel 렌더러를 묶어 재고 조회, 품의서 작성, 보고서 파일 생성을 처리합니다.
 
 ## Overview
 
 ```text
 LAN User -> Open WebUI (:3000) -> vLLM Model API
                               -> Tool Calls on the same host
-                                 -> http://127.0.0.1:8001 Rust Service
-                                 -> http://127.0.0.1:8002 Python Search/Parser
-                                 -> http://127.0.0.1:8003 Markdown Renderer
+                                 -> Python 파서/검색 도구
+                                    -> http://127.0.0.1:8002 Python Search/Parser
+                                 -> 통합 문서 제작기
+                                    -> http://127.0.0.1:8001 Rust 품의문/재고 API
+                                    -> http://127.0.0.1:8003 Markdown PDF/Word/Excel Renderer
 ```
 
 개발 표준 실행은 `docker-compose.host.yml` 오버레이를 함께 사용합니다. 따라서 Open WebUI가 등록해 호출하는 도구 URL은 컨테이너 서비스명(`document-service`, `parser-service`)이 아니라 실행 기기 기준 `127.0.0.1`입니다. 기본 `docker-compose.yml`만 단독 실행할 때만 Docker bridge 네트워크의 서비스명을 사용할 수 있습니다.
@@ -17,11 +19,18 @@ LAN User -> Open WebUI (:3000) -> vLLM Model API
 구성 요소:
 
 - `open-webui`: 사용자 UI, 툴 서버 연결 설정, 실행 환경 변수
-- `rust-service`: 구매 품의서 생성, 재고 조회, 구매/재고 보고서 내보내기 API
-- `python-service`: RAW 문서 Markdown 변환, 레거시 문서 검색, 문서 필드 보조 API
-- `markdown-pdf-service`: Markdown 보고서를 한글 PDF 파일로 렌더링하는 API
+- `python-service`: Python 파서/검색 도구. RAW 문서 Markdown 변환, 레거시 문서 검색, 문서 필드 보조 API
+- `rust-service`: 통합 문서 제작기 진입점. 구매 품의문 작성, 재고 조회, 구매/재고 보고서 내보내기, 렌더러 프록시 API
+- `markdown-pdf-service`: 통합 문서 제작기 내부 렌더러. Markdown 보고서를 PDF/Word/Excel 파일로 렌더링하는 API
 - `scripts`: 로컬 실행, Docker 실행, Open WebUI 동기화 스크립트
 - `docs`: 운영 메모와 연결 문서
+
+## Open WebUI Tool Layout
+
+Open WebUI에는 다음 두 도구 서버를 기본으로 등록합니다.
+
+- `Python 파서/검색 도구` (`document_search`): 내부 문서, 업무보고 원문, 수리 이력, 날짜별 작업 기록, 기존 근거 검색 전용입니다. PDF 생성이나 구매 품의문 작성에는 사용하지 않습니다.
+- `통합 문서 제작기` (`document_generation_tools`): Rust 품의문 작성기와 Markdown 렌더러를 하나의 도구로 묶습니다. 재고/품목 조회, 구매 품의서 DOCX/ZIP 생성, 재고 보고서 파일 생성, Markdown PDF 생성, 보고서/채팅 기록 Word/Excel 내보내기와 다운로드 링크 생성을 처리합니다.
 
 ## Key APIs
 
@@ -40,7 +49,7 @@ LAN User -> Open WebUI (:3000) -> vLLM Model API
 - `POST /render/chat-docx`
 - `POST /render/chat-xlsx`
 
-Open WebUI에서는 Rust 문서 생성 도구(`document_generation_tools`)가 구매 품의서, 재고 조회, 보고서 파일 생성, Markdown PDF, Word, Excel 내보내기를 단일 도구 서버로 노출합니다. Python 문서 검색(`document_search`)은 내부 문서 검색과 근거 조회 전용으로 사용합니다.
+Open WebUI에서는 `통합 문서 제작기`(`document_generation_tools`)가 구매 품의서, 재고 조회, 보고서 파일 생성, Markdown PDF, Word, Excel 내보내기를 단일 도구 서버로 노출합니다. `Python 파서/검색 도구`(`document_search`)는 내부 문서 검색과 근거 조회 전용으로 사용합니다.
 
 ## Legacy Stock Snapshot Rules
 

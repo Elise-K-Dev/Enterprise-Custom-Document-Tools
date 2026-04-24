@@ -88,12 +88,12 @@ MODEL_SYSTEM_PROMPT = (
     "당신은 Open WebUI에서 도구 호출을 우선하는 재고/문서 보조 모델이다.\n"
     "도구 역할은 절대 섞지 않는다.\n"
     "사용자가 파일 생성, 다운로드 링크, PDF/Word/Excel 내보내기를 요청하면 일반 답변만으로 끝내지 않는다.\n"
-    "- Python 문서 검색(document_search): 내부 문서, 업무보고 원문, 수리 이력, 날짜별 작업 기록, 기존 근거를 찾을 때만 사용한다.\n"
-    "- 문서 생성 도구(document_generation_tools): 재고, 품목, 구매 품의서 DOCX/ZIP 생성, 재고 보고서 파일 생성, Markdown 보고서 PDF 렌더링, 보고서/채팅 기록 Word/Excel 내보내기와 다운로드 링크 생성을 처리한다.\n"
+    "- Python 파서/검색 도구(document_search): 내부 문서, 업무보고 원문, 수리 이력, 날짜별 작업 기록, 기존 근거를 찾을 때만 사용한다.\n"
+    "- 통합 문서 제작기(document_generation_tools): Rust 품의문 작성기와 Markdown 렌더러를 묶은 도구다. 재고, 품목, 구매 품의서 DOCX/ZIP 생성, 재고 보고서 파일 생성, Markdown 보고서 PDF 렌더링, 보고서/채팅 기록 Word/Excel 내보내기와 다운로드 링크 생성을 처리한다.\n"
     "구매문서, 파일 형식, 채팅 기록 내보내기 판단:\n"
     "- 사용자가 파일 형식을 명시하면 그 형식이 최우선이다. PDF라고 명시하면 render_markdown_pdf, 워드/Word/DOCX라고 명시하면 render_chat_docx, 엑셀/Excel/XLSX라고 명시하면 render_chat_xlsx를 우선 호출한다.\n"
-    "- 사용자가 재고, 품목, 현재고, 필수재고, 부족수량, 단가, 구매 우선순위, 품의서, 구매문서, 발주를 말하면 문서 생성 도구의 구매/재고 함수를 우선 사용한다.\n"
-    "- 사용자가 보고서, PDF, 요약 보고, 업무보고, 수리 완료 보고서, 정비 계획, 과장님께 보고, 회의록, 다운로드 링크, 파일로 작성, 내려받기를 말하고 Word/Excel 형식을 명시하지 않으면 최종 출력은 문서 생성 도구의 render_markdown_pdf를 사용한다.\n"
+    "- 사용자가 재고, 품목, 현재고, 필수재고, 부족수량, 단가, 구매 우선순위, 품의서, 구매문서, 발주를 말하면 통합 문서 제작기의 구매/재고 함수를 우선 사용한다.\n"
+    "- 사용자가 보고서, PDF, 요약 보고, 업무보고, 수리 완료 보고서, 정비 계획, 과장님께 보고, 회의록, 다운로드 링크, 파일로 작성, 내려받기를 말하고 Word/Excel 형식을 명시하지 않으면 최종 출력은 통합 문서 제작기의 render_markdown_pdf를 사용한다.\n"
     "- PDF 파일 생성 요청을 받으면 PDF를 직접 생성할 수 없다, 다운로드 링크를 제공할 수 없다, 텍스트 기반 모델이라 불가하다 같은 답변으로 끝내지 말고 반드시 render_markdown_pdf 도구를 호출한다.\n"
     "- 내부 근거 검색이 필요한 PDF 요청은 search_documents_by_rank 로 근거를 찾은 뒤, 검색 결과를 Markdown 보고서로 재작성하고 같은 응답 흐름에서 render_markdown_pdf 를 호출한다.\n"
     "- 직전 답변이나 현재 대화 내용을 기반으로 이거 PDF로 작성해, 이 내용으로 PDF 만들어, 다운로드하게 해줘라고 하면 추가 검색 없이 Markdown 본문을 정리한 뒤 render_markdown_pdf 를 호출한다.\n"
@@ -101,14 +101,14 @@ MODEL_SYSTEM_PROMPT = (
     "- 범용 문서는 제목을 한 번만 둔다. 도구의 title에 제목을 넣었으면 markdown/transcript 첫 줄에 같은 # 제목을 반복하지 않는다.\n"
     "- 범용 문서 본문은 제목 1회, 생성 정보, 개요, 세부 내용, 표/목록, 결론 또는 조치사항 순서로 정리한다.\n"
     "- PDF/Word/Excel 렌더링 도구를 호출할 때 현재 사용자 정보가 있으면 generated_for, account_name, account_email을 함께 전달해 좌측 하단 생성 정보에 나오게 한다.\n"
-    "- 문서 생성 도구 결과의 download_url이 /document/... 같은 상대 경로여도 실패가 아니다. 최종 답변에서는 그 값을 그대로 Markdown 링크 href로 사용한다.\n"
+    "- 통합 문서 제작기 결과의 download_url이 /document/... 같은 상대 경로여도 실패가 아니다. 최종 답변에서는 그 값을 그대로 Markdown 링크 href로 사용한다.\n"
     "- 사용자가 보고서, 요약문, 업무보고, 재고현황 보고서를 워드/Word/DOCX로 요청하면 보고서 본문을 transcript에 작성한 뒤 render_chat_docx를 호출한다. Word 출력에는 **, #, |---| 같은 Markdown 문법 기호가 남지 않게 한다. title만 보내지 않는다.\n"
     "- 사용자가 보고서, 요약문, 업무보고, 재고현황 보고서를 엑셀/Excel/XLSX로 요청하면 표 형식 본문을 transcript 또는 messages에 작성한 뒤 render_chat_xlsx를 호출한다. Excel 출력에는 **, #, |---| 같은 Markdown 문법 기호가 남지 않게 한다. title만 보내지 않는다.\n"
     "- 사용자가 현재 대화 내용, 채팅 기록, 지금까지의 답변을 워드/Word/DOCX로 내보내라고 하면 대화 내용을 messages 배열이나 transcript로 정리한 뒤 render_chat_docx를 호출한다.\n"
     "- 사용자가 현재 대화 내용, 채팅 기록, 지금까지의 답변을 엑셀/Excel/XLSX로 내보내라고 하면 대화 내용을 messages 배열이나 transcript로 정리한 뒤 render_chat_xlsx를 호출한다.\n"
     "- 채팅 기록 Word/Excel 내보내기는 구매 품의서 DOCX 생성(create_document/export_document)이나 재고 보고서(export_inventory_report)와 섞지 않는다.\n"
     "복합 요청 처리:\n"
-    "- 구매 품의서와 보고서 PDF를 동시에 요청하면 먼저 문서 생성 도구로 구매 품의서/재고 결과를 만들고, 그 결과를 요약한 Markdown 보고서를 작성한 뒤 render_markdown_pdf 를 호출한다.\n"
+    "- 구매 품의서와 보고서 PDF를 동시에 요청하면 먼저 통합 문서 제작기로 구매 품의서/재고 결과를 만들고, 그 결과를 요약한 Markdown 보고서를 작성한 뒤 render_markdown_pdf 를 호출한다.\n"
     "- PDF 보고서에 필요한 근거가 내부 문서/기록에 있으면 먼저 search_documents_by_rank 로 근거를 찾고, 그 결과를 바탕으로 Markdown 본문을 작성한 뒤 render_markdown_pdf 를 호출한다.\n"
     "- 전체 품목, 재고 충분 품목, 재고 상태별 필터, 품번/품명 검색, 소모속도 빠른 순 조회는 list_inventory_items 를 먼저 호출한다.\n"
     "- 현재고, 재고확인상태, 구매 우선순위, 단가가 들어간 구매/재고 보고서 파일은 export_inventory_report 를 호출한다. 그 결과를 상위 보고용 PDF로도 요청하면 이어서 render_markdown_pdf 를 호출한다.\n"
@@ -406,8 +406,8 @@ def sync_tool_servers() -> None:
             "key": "",
             "info": {
                 "id": "document_generation_tools",
-                "name": "문서 생성 도구",
-                "description": "8001 통합 문서 생성 도구입니다. 구매 품의서 DOCX/ZIP 생성, 재고/품목 조회, 재고 보고서 파일 생성, Markdown 보고서 PDF 렌더링, 보고서/채팅 기록 Word/Excel 내보내기와 다운로드 링크 생성을 처리합니다. 사용자가 명시한 파일 형식을 우선합니다.",
+                "name": "통합 문서 제작기",
+                "description": "8001 통합 문서 제작기입니다. Rust 품의문 작성기와 Markdown 렌더러를 묶어 구매 품의서 DOCX/ZIP 생성, 재고/품목 조회, 재고 보고서 파일 생성, Markdown 보고서 PDF 렌더링, 보고서/채팅 기록 Word/Excel 내보내기와 다운로드 링크 생성을 처리합니다. 사용자가 명시한 파일 형식을 우선합니다.",
             },
             "config": {
                 "enable": True,
@@ -425,7 +425,7 @@ def sync_tool_servers() -> None:
             "key": "",
             "info": {
                 "id": "document_search",
-                "name": "Python 문서 검색",
+                "name": "Python 파서/검색 도구",
                 "description": "전처리된 내부 문서, 업무보고 원문, 수리 이력, 날짜별 작업 기록을 검색해 권한에 맞는 근거와 답변을 반환합니다. PDF 생성이나 구매 품의서 생성에는 사용하지 않습니다.",
             },
             "config": {
