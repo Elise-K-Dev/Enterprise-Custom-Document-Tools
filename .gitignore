@@ -24,3 +24,7 @@ python-service/legacy-md-indexer-main/setting.conf
 rust-service/target/
 rust-service/DB/logs/
 rust-service/DB/output/
+
+markdown-pdf-service/output/
+markdown-pdf-service/output.bak.*/
+python-service/*.egg-info/

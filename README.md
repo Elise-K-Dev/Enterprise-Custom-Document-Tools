@@ -1,6 +1,6 @@
 # Enterprise Custom Document Tools
 
-Open WebUI를 프런트로 두고, 문서 생성과 내보내기는 Rust 서비스에, 문서 파싱과 레거시 문서 검색 및 필드 채우기 보조는 Python 서비스에 분리한 사내 문서 자동화 워크스페이스입니다.
+Open WebUI를 프런트로 두고, 구매 품의서와 재고 업무는 Rust 서비스에, 문서 검색과 파싱은 Python 서비스에, 범용 보고서 PDF 렌더링은 Markdown PDF 서비스에 분리한 사내 문서 자동화 워크스페이스입니다.
 
 ## Overview
 
@@ -9,13 +9,15 @@ User -> Open WebUI -> vLLM
                     -> Tool Calls
                        -> Rust Service   (:8001 /document/create, /document/fill, /document/export)
                        -> Python Service (:8002 /parser/to-md, /document/fill-fields, /search/query)
+                       -> Markdown PDF   (:8003 /render/markdown-pdf)
 ```
 
 구성 요소:
 
 - `open-webui`: 사용자 UI, 툴 서버 연결 설정, 실행 환경 변수
-- `rust-service`: 문서 생성, 필드 채우기, 내보내기 API
-- `python-service`: RAW 문서 Markdown 변환, 레거시 검색, 문서 필드 보조 API
+- `rust-service`: 구매 품의서 생성, 재고 조회, 구매/재고 보고서 내보내기 API
+- `python-service`: RAW 문서 Markdown 변환, 레거시 문서 검색, 문서 필드 보조 API
+- `markdown-pdf-service`: Markdown 보고서를 한글 PDF 파일로 렌더링하는 API
 - `scripts`: 로컬 실행, Docker 실행, Open WebUI 동기화 스크립트
 - `docs`: 운영 메모와 연결 문서
 
@@ -32,6 +34,7 @@ User -> Open WebUI -> vLLM
 - `POST /parser/to-md`
 - `POST /document/fill-fields`
 - `POST /search/query`
+- `POST /render/markdown-pdf`
 
 ## Legacy Stock Snapshot Rules
 
@@ -101,6 +104,12 @@ Parser service:
 bash scripts/start_parser_service.sh
 ```
 
+Markdown PDF service:
+
+```bash
+bash scripts/start_markdown_pdf_service.sh
+```
+
 ## Docker Compose
 
 ```bash
@@ -112,6 +121,7 @@ docker compose up -d --build
 
 - `document-service`는 `./rust-service/templates`를 `/app/templates`로 read-only 마운트합니다.
 - `parser-service`는 레거시 검색용 Python 서비스를 함께 기동합니다.
+- `markdown-pdf-service`는 Markdown 보고서 PDF를 생성하고 `./markdown-pdf-service/output`에 저장합니다.
 - Open WebUI는 같은 Docker 네트워크에서 서비스명으로 각 API를 호출합니다.
 
 서비스 엔드포인트:
@@ -120,15 +130,18 @@ docker compose up -d --build
 vLLM              -> http://192.168.100.13:8000/v1
 Rust creator API  -> http://192.168.100.13:8001
 Python parser API -> http://192.168.100.13:8002
+Markdown PDF API  -> http://127.0.0.1:8003
 Open WebUI        -> http://127.0.0.1:3000
 document-service  -> http://document-service:8001/openapi.json
 parser-service    -> http://parser-service:8002/openapi.json
+markdown-pdf      -> http://markdown-pdf-service:8003/openapi.json
 ```
 
 Open WebUI import 예시:
 
 - `open-webui/openwebui-rust-tools.json`
 - `open-webui/openwebui-python-tools.json`
+- `open-webui/openwebui-markdown-pdf-tools.json`
 
 ## Repository Notes
 

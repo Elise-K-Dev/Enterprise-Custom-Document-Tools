@@ -364,6 +364,34 @@ fn replace_tokens_in_text_docx(text: &str, values: &BTreeMap<&'static str, Strin
         }
     }
     out.push_str(&text[cursor..]);
+    replace_legacy_double_paren_tokens_docx(&out, values)
+}
+
+fn replace_legacy_double_paren_tokens_docx(
+    text: &str,
+    values: &BTreeMap<&'static str, String>,
+) -> String {
+    let mut out = String::with_capacity(text.len() + 64);
+    let mut cursor = 0usize;
+    while let Some(start_rel) = text[cursor..].find("((") {
+        let start = cursor + start_rel;
+        out.push_str(&text[cursor..start]);
+        let body_start = start + 2;
+        if let Some(end_rel) = text[body_start..].find("))") {
+            let body_end = body_start + end_rel;
+            let key = text[body_start..body_end].trim();
+            let value = values
+                .get(key)
+                .cloned()
+                .unwrap_or_else(|| text[start..body_end + 2].to_string());
+            out.push_str(&value);
+            cursor = body_end + 2;
+        } else {
+            out.push_str(&text[start..]);
+            return out;
+        }
+    }
+    out.push_str(&text[cursor..]);
     out
 }
 
@@ -461,6 +489,20 @@ fn build_docx_values(row: &DocumentRow, serial: usize) -> BTreeMap<&'static str,
     let today = now.format("%Y-%m-%d").to_string();
     let doc_date = now.format("%Y%m%d").to_string();
     let purchase_reason = build_purchase_reason_text(row);
+    let vendor = fallback_doc_value(&row.vendor_name);
+    let new_vendor = "(직접입력)".to_string();
+    let manufacturer = fallback_doc_value(&row.manufacturer_name);
+    let unit = fallback_doc_value(&row.unit);
+    let target_where = fallback_doc_value(&row.used_where);
+    let purchase_qty = format!("{:.0}", row.purchase_qty.max(1.0));
+    let purchase_qty_num = row.purchase_qty.max(1.0);
+    let unit_price_num = parse_numeric_text(&row.unit_price);
+    let unit_price_text = unit_price_num
+        .map(|n| format_price_docx(&format!("{:.2}", n)))
+        .unwrap_or_else(|| fallback_doc_value(&row.unit_price));
+    let supply_amount_text = unit_price_num
+        .map(|p| format_price_docx(&format!("{:.2}", p * purchase_qty_num)))
+        .unwrap_or_else(|| "(직접입력)".to_string());
     let mut m = BTreeMap::new();
     m.insert("번호", row.part_no.clone());
     m.insert("문서번호", format!("DOC-{}-{:04}", doc_date, serial));
@@ -473,20 +515,47 @@ fn build_docx_values(row: &DocumentRow, serial: usize) -> BTreeMap<&'static str,
     m.insert("부품명", row.part_name.clone());
     m.insert("품번", row.part_no.clone());
     m.insert("파트넘버", row.part_no.clone());
-    m.insert("장비명", row.used_where.clone());
+    m.insert("장비범주", target_where.clone());
+    m.insert("장비", target_where.clone());
+    m.insert("장비명", target_where.clone());
     m.insert("현재고", format!("{:.0}", row.current_stock_before));
-    m.insert("구매량", format!("{:.0}", row.purchase_qty.max(1.0)));
-    m.insert("구매수량", format!("{:.0}", row.purchase_qty.max(1.0)));
-    m.insert("단위", row.unit.clone());
-    m.insert("단가", row.unit_price.clone());
+    m.insert("재고", format!("{:.0}", row.current_stock_before));
+    m.insert("구매량", purchase_qty.clone());
+    m.insert("구매수량", purchase_qty.clone());
+    m.insert("구매 직접입력", purchase_qty.clone());
+    m.insert("구매직접입력", purchase_qty.clone());
+    m.insert("단위", unit);
+    m.insert("단가", unit_price_text.clone());
     m.insert("구매사유", purchase_reason.clone());
-    m.insert("비고", row.purchase_order_note.clone());
-    m.insert("구-거래처", row.vendor_name.clone());
-    m.insert("구거래처", row.vendor_name.clone());
-    m.insert("공급업체", row.vendor_name.clone());
-    m.insert("부품제조사", row.manufacturer_name.clone());
+    m.insert("사유", purchase_reason.clone());
+    m.insert("비고", purchase_reason.clone());
+    m.insert("구-거래처", vendor.clone());
+    m.insert("구거래처", vendor.clone());
+    m.insert("공급업체", new_vendor.clone());
+    m.insert("신규 거래업체", new_vendor.clone());
+    m.insert("부품제조사", manufacturer);
+    m.insert("장착수량 직접입력", row.issued_qty.clone());
     m.insert("부품-원리-및-역할", row.part_role.clone());
     m.insert("부품역할", row.part_role.clone());
+    m.insert("구매수량 선정 사유", purchase_reason.clone());
+    m.insert("공급액", supply_amount_text.clone());
+    m.insert("공급가액", supply_amount_text.clone());
+    m.insert("공급가액합계", supply_amount_text.clone());
+    m.insert("합계", supply_amount_text.clone());
+    m.insert("신규 거래업체 단가", unit_price_text.clone());
+    m.insert("신규 거래업체 공급가액", supply_amount_text.clone());
+    m.insert("신규 업체 공급가액 공급가액", supply_amount_text.clone());
+    m.insert("신규거래업체 공급가총액", supply_amount_text);
+    m.insert("구단가", unit_price_text);
+    m.insert("담당자 직접입력", "(직접입력)".to_string());
+    m.insert("번호 직접입력", "(직접입력)".to_string());
+    m.insert("업체명 직접입력", new_vendor);
+    m.insert("신규 거래업체 담당자", "(직접입력)".to_string());
+    m.insert("신규 거래업체 담당자 번호", "(직접입력)".to_string());
+    m.insert("신규 업체 납기기간", "(직접입력)".to_string());
+    m.insert("향후 정비사항 직접입력", "(직접입력)".to_string());
+    m.insert("향후 정비 예정 사항 직접입력", "(직접입력)".to_string());
+    m.insert("수리진행여부", "(직접입력)".to_string());
     m.insert("사용일", row.used_date_last.clone());
     m.insert("입고일", row.received_date.clone());
     m.insert("사용처", row.used_where.clone());
@@ -517,6 +586,68 @@ fn build_docx_values(row: &DocumentRow, serial: usize) -> BTreeMap<&'static str,
         );
     }
     m
+}
+
+fn fallback_doc_value(v: &str) -> String {
+    if is_missing_doc_value(v) {
+        "(직접입력)".to_string()
+    } else {
+        v.to_string()
+    }
+}
+
+fn is_missing_doc_value(v: &str) -> bool {
+    let t = v.trim();
+    t.is_empty() || matches!(t, "기록없음" | "출고기록없음" | "입고기록없음")
+}
+
+fn parse_numeric_text(raw: &str) -> Option<f64> {
+    let cleaned: String = raw
+        .chars()
+        .filter(|c| c.is_ascii_digit() || *c == '.' || *c == '-')
+        .collect();
+    if cleaned.is_empty() || cleaned == "-" || cleaned == "." {
+        return None;
+    }
+    cleaned.parse::<f64>().ok()
+}
+
+fn format_price_docx(input: &str) -> String {
+    let trimmed = input.trim();
+    if trimmed.is_empty() {
+        return "(직접입력)".to_string();
+    }
+    let negative = trimmed.starts_with('-');
+    let unsigned = if negative { &trimmed[1..] } else { trimmed };
+    let mut parts = unsigned.splitn(2, '.');
+    let int_part = parts.next().unwrap_or_default();
+    let frac_part = parts.next();
+    if !int_part.chars().all(|c| c.is_ascii_digit()) {
+        return input.to_string();
+    }
+
+    let mut grouped_rev = String::with_capacity(int_part.len() + (int_part.len() / 3));
+    for (i, ch) in int_part.chars().rev().enumerate() {
+        if i > 0 && i % 3 == 0 {
+            grouped_rev.push(',');
+        }
+        grouped_rev.push(ch);
+    }
+    let mut grouped: String = grouped_rev.chars().rev().collect();
+
+    if let Some(frac) = frac_part {
+        let frac_trimmed = frac.trim_end_matches('0');
+        if !frac_trimmed.is_empty() {
+            grouped.push('.');
+            grouped.push_str(frac_trimmed);
+        }
+    }
+
+    if negative {
+        format!("-{}", grouped)
+    } else {
+        grouped
+    }
 }
 
 fn xml_escape_docx(v: &str) -> String {

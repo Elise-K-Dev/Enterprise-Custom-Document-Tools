@@ -1,3 +1,5 @@
+#![recursion_limit = "256"]
+
 use std::{
     collections::{BTreeMap, HashMap},
     fs,
@@ -11,7 +13,7 @@ use axum::{
     extract::{Query, State},
     http::{
         header::{CONTENT_DISPOSITION, CONTENT_TYPE},
-        HeaderValue, StatusCode,
+        HeaderMap, HeaderValue, StatusCode,
     },
     response::IntoResponse,
     routing::{get, post},
@@ -42,8 +44,11 @@ use legacy_port::{
 struct AppState {
     templates: Arc<HashMap<String, TemplateDefinition>>,
     sessions: Arc<RwLock<HashMap<String, SessionState>>>,
+    download_grants: Arc<RwLock<HashMap<String, DownloadGrant>>>,
     legacy_workdir: Option<PathBuf>,
     public_base_url: String,
+    markdown_pdf_base_url: String,
+    http_client: reqwest::Client,
 }
 
 #[derive(Debug, Clone)]
@@ -59,6 +64,20 @@ struct SessionState {
     template_id: String,
     fields: BTreeMap<String, serde_json::Value>,
     missing_fields: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+struct RegisteredUser {
+    id: String,
+    email: String,
+    name: String,
+}
+
+#[derive(Debug, Clone)]
+struct DownloadGrant {
+    path: String,
+    user: RegisteredUser,
+    expires_at: i64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -150,11 +169,81 @@ struct LegacyPackageResponse {
 #[derive(Debug, Deserialize)]
 struct LegacyDownloadQuery {
     path: String,
+    token: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct MarkdownPdfDownloadQuery {
+    path: String,
+    token: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct RenderMarkdownPdfRequest {
+    title: String,
+    markdown: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    file_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    page_size: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    orientation: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    generated_for: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    account_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    account_email: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ChatMessage {
+    role: String,
+    content: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    created_at: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct RenderChatDocumentRequest {
+    title: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    messages: Vec<ChatMessage>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    transcript: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    file_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    generated_for: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    account_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    account_email: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct RenderMarkdownPdfResponse {
+    title: String,
+    file_name: String,
+    download_path: String,
+    download_url: String,
+    assistant_summary: String,
 }
 
 #[derive(Debug, Deserialize)]
 struct LegacyShortagesQuery {
     query: Option<String>,
+    limit: Option<usize>,
+}
+
+#[derive(Debug, Deserialize)]
+struct LegacyInventoryQuery {
+    query: Option<String>,
+    status: Option<String>,
+    match_status: Option<String>,
+    sort: Option<String>,
     limit: Option<usize>,
 }
 
@@ -170,6 +259,36 @@ struct LegacyShortagesResponse {
     unverified_markdown_table: Option<String>,
     items: Vec<LegacyShortageItem>,
     unverified_items: Vec<LegacyShortageItem>,
+}
+
+#[derive(Debug, Serialize)]
+struct LegacyInventoryResponse {
+    data_source: String,
+    source_policy: String,
+    snapshot_json_path: String,
+    snapshot_date: Option<String>,
+    total_count: usize,
+    returned_count: usize,
+    filter_options: LegacyInventoryFilterOptions,
+    markdown_table: String,
+    items: Vec<LegacyShortageItem>,
+}
+
+#[derive(Debug, Serialize)]
+struct LegacyInventoryReportResponse {
+    output_path: String,
+    download_path: String,
+    download_url: String,
+    file_name: String,
+    generated_count: usize,
+    assistant_summary: String,
+}
+
+#[derive(Debug, Serialize)]
+struct LegacyInventoryFilterOptions {
+    status: Vec<&'static str>,
+    match_status: Vec<&'static str>,
+    sort: Vec<&'static str>,
 }
 
 #[derive(Debug, Serialize, Clone)]
@@ -189,6 +308,9 @@ struct LegacyShortageItem {
     inventory_confirmed: bool,
     inventory_match_status: String,
     stock_status: String,
+    unit_price: Option<f64>,
+    purchase_priority: String,
+    purchase_policy_note: String,
     summary: String,
     document_request_hint: String,
 }
@@ -256,6 +378,12 @@ struct LegacyApproveResponse {
     assistant_summary: String,
 }
 
+const INTERNAL_TOKEN_HEADER: &str = "x-port-project-internal-token";
+const OPEN_WEBUI_USER_EMAIL_HEADER: &str = "x-openwebui-user-email";
+const OPEN_WEBUI_USER_ID_HEADER: &str = "x-openwebui-user-id";
+const OPEN_WEBUI_USER_NAME_HEADER: &str = "x-openwebui-user-name";
+const DEFAULT_DOWNLOAD_TOKEN_TTL_SECONDS: i64 = 3600;
+
 fn default_true() -> bool {
     true
 }
@@ -290,9 +418,9 @@ async fn openapi_spec() -> Json<serde_json::Value> {
     Json(serde_json::json!({
         "openapi": "3.0.0",
         "info": {
-            "title": "Purchase Document Package Generator",
+            "title": "Document Generation Gateway",
             "version": "1.0.0",
-            "description": "구매 품의 문서 전체를 자동 생성하고 ZIP 다운로드 정보를 반환하는 도구 서버"
+            "description": "구매 품의서, 재고 보고서, Markdown 기반 PDF 보고서, 보고서/채팅 기록 Word/Excel 내보내기를 8001 단일 문서 생성 도구로 처리하고 다운로드 정보를 반환하는 도구 서버"
         },
         "servers": [
             { "url": "http://document-service:8001" }
@@ -322,8 +450,8 @@ async fn openapi_spec() -> Json<serde_json::Value> {
             "/document/create": {
                 "post": {
                     "operationId": "create_document",
-                    "summary": "대화형 구매 품의 문서 채우기 세션 시작",
-                    "description": "사용자의 최초 요청을 바탕으로 Rust 문서 채우기 세션을 만들고 누락 필드와 다음 질문을 반환한다. 품명 또는 품번이 입력에 포함되면 전처리 완료된 stock_in_out_monthly.json 스냅샷을 기준으로 품명, 품번, 현재고, 교체이력 관련 필드를 자동 보강한다.",
+                    "summary": "구매 품의서 전용 대화형 문서 채우기 세션 시작",
+                    "description": "구매 품의서(purchase_request) 전용 도구다. template_id는 반드시 purchase_request만 사용한다. 수리 완료 보고서, 업무 보고서, 회의록, 일반 요약 보고서, repair_report 같은 템플릿은 이 도구로 만들지 말고 Markdown 본문을 작성한 뒤 render_markdown_pdf를 호출한다. 품명 또는 품번이 입력에 포함되면 전처리 완료된 stock_in_out_monthly.json 스냅샷을 기준으로 품명, 품번, 현재고, 교체이력 관련 필드를 자동 보강한다.",
                     "requestBody": {
                         "required": true,
                         "content": {
@@ -332,7 +460,7 @@ async fn openapi_spec() -> Json<serde_json::Value> {
                                     "type": "object",
                                     "required": ["template_id", "input_text"],
                                     "properties": {
-                                        "template_id": { "type": "string", "example": "purchase_request" },
+                                        "template_id": { "type": "string", "enum": ["purchase_request"], "example": "purchase_request" },
                                         "input_text": { "type": "string" }
                                     }
                                 }
@@ -345,8 +473,8 @@ async fn openapi_spec() -> Json<serde_json::Value> {
             "/document/fill": {
                 "post": {
                     "operationId": "fill_document",
-                    "summary": "대화형 구매 품의 문서 필드 추가 채움",
-                    "description": "이전 세션 상태와 현재 사용자 답변을 합쳐 필드를 갱신하고 다음으로 채울 칸을 반환한다. 사용자가 납품업체: 지정 협력사 처럼 말하면 해당 칸을 확정한다. 품명 또는 품번이 확인되면 전처리 완료된 stock_in_out_monthly.json 스냅샷을 기준으로 재고 및 이력 필드를 다시 보강한다.",
+                    "summary": "구매 품의서 전용 대화형 문서 필드 추가 채움",
+                    "description": "purchase_request 구매 품의서 세션 전용 도구다. 수리 완료 보고서, 업무 보고서, 회의록, 일반 요약 보고서에는 사용하지 않는다. 이전 세션 상태와 현재 사용자 답변을 합쳐 필드를 갱신하고 다음으로 채울 칸을 반환한다. 사용자가 납품업체: 지정 협력사 처럼 말하면 해당 칸을 확정한다. 품명 또는 품번이 확인되면 전처리 완료된 stock_in_out_monthly.json 스냅샷을 기준으로 재고 및 이력 필드를 다시 보강한다.",
                     "requestBody": {
                         "required": true,
                         "content": {
@@ -355,7 +483,7 @@ async fn openapi_spec() -> Json<serde_json::Value> {
                                     "type": "object",
                                     "required": ["template_id", "session_id", "user_message"],
                                     "properties": {
-                                        "template_id": { "type": "string", "example": "purchase_request" },
+                                        "template_id": { "type": "string", "enum": ["purchase_request"], "example": "purchase_request" },
                                         "session_id": { "type": "string" },
                                         "current_fields": {
                                             "type": "object",
@@ -373,8 +501,8 @@ async fn openapi_spec() -> Json<serde_json::Value> {
             "/document/export": {
                 "post": {
                     "operationId": "export_document",
-                    "summary": "채워진 필드로 문서 내보내기",
-                    "description": "대화형으로 채운 필드를 사용해 문서 파일 내용을 생성한다. docx 형식이면 Rust 레거시 DOCX 렌더러를 사용한다. 품명 또는 품번이 채워져 있으면 렌더 직전에 전처리 완료된 stock_in_out_monthly.json 스냅샷 기준으로 재고/이력 필드를 다시 보강한다.",
+                    "summary": "구매 품의서 전용 채워진 필드로 문서 내보내기",
+                    "description": "purchase_request 구매 품의서 필드를 사용해 문서 파일 내용을 생성한다. 수리 완료 보고서, 업무 보고서, 회의록, 일반 요약 보고서에는 사용하지 않는다. docx 형식이면 Rust 레거시 DOCX 렌더러를 사용한다. 품명 또는 품번이 채워져 있으면 렌더 직전에 전처리 완료된 stock_in_out_monthly.json 스냅샷 기준으로 재고/이력 필드를 다시 보강한다.",
                     "requestBody": {
                         "required": true,
                         "content": {
@@ -383,7 +511,7 @@ async fn openapi_spec() -> Json<serde_json::Value> {
                                     "type": "object",
                                     "required": ["template_id", "fields", "format"],
                                     "properties": {
-                                        "template_id": { "type": "string", "example": "purchase_request" },
+                                        "template_id": { "type": "string", "enum": ["purchase_request"], "example": "purchase_request" },
                                         "fields": {
                                             "type": "object",
                                             "additionalProperties": true
@@ -484,6 +612,124 @@ async fn openapi_spec() -> Json<serde_json::Value> {
                     }
                 }
             },
+            "/document/legacy/items": {
+                "get": {
+                    "operationId": "list_inventory_items",
+                    "summary": "전체 품목 인덱스 및 재고/소모 기준 조회",
+                    "description": "사용자가 전체 품목 리스트, 재고가 충분한 품목, 재고 상태별 필터, 품번/품명 검색, 재고 매칭 상태, 부품 소모속도 빠른 순 조회를 요청하면 이 도구를 사용한다. 반드시 전처리 완료된 stock_in_out_monthly.json 스냅샷만 기준으로 답하고, 원천 엑셀 파일을 직접 현재 조회 근거로 설명하면 안 된다. 응답의 filter_options는 사용자가 다시 필터링할 수 있는 조건이며, markdown_table 필드가 있으면 그 값을 우선 사용해 마크다운 표로 보여준다.",
+                    "parameters": [
+                        {
+                            "name": "query",
+                            "in": "query",
+                            "required": false,
+                            "schema": { "type": "string" },
+                            "description": "품목명 또는 품번 키워드"
+                        },
+                        {
+                            "name": "status",
+                            "in": "query",
+                            "required": false,
+                            "schema": {
+                                "type": "string",
+                                "enum": ["all", "shortage", "sufficient", "out_of_stock", "unverified", "confirmed"]
+                            },
+                            "description": "재고 상태 필터. all은 전체, shortage는 부족/재고없음, sufficient는 재고 충분, out_of_stock은 현재고 0 이하, unverified는 재고 미확인, confirmed는 재고 확인 품목"
+                        },
+                        {
+                            "name": "match_status",
+                            "in": "query",
+                            "required": false,
+                            "schema": {
+                                "type": "string",
+                                "enum": ["matched_all", "stock_inbound", "stock_outbound", "stock_only", "movement_only", "inbound_only", "outbound_only", "unclassified"]
+                            },
+                            "description": "재고/입고/출고 매칭 상태 필터"
+                        },
+                        {
+                            "name": "sort",
+                            "in": "query",
+                            "required": false,
+                            "schema": {
+                                "type": "string",
+                                "default": "priority",
+                                "enum": ["priority", "consumption", "net_decrease", "shortage", "stock", "name", "outbound"]
+                            },
+                            "description": "정렬 기준. consumption은 최근 출고합계가 큰 순, net_decrease는 이동 순증감이 낮은 순, shortage는 부족수량 큰 순"
+                        },
+                        {
+                            "name": "limit",
+                            "in": "query",
+                            "required": false,
+                            "schema": { "type": "integer", "default": 50 },
+                            "description": "최대 반환 개수"
+                        }
+                    ],
+                    "responses": {
+                        "200": {
+                            "description": "Inventory items listed"
+                        }
+                    }
+                }
+            },
+            "/document/legacy/items/report": {
+                "get": {
+                    "operationId": "export_inventory_report",
+                    "summary": "전체 또는 필터된 품목 재고 현황 보고서 파일 생성",
+                    "description": "사용자가 전체 품목 리스트, 재고확인상태, 구매 우선순위, 단가가 들어간 문서 파일이나 보고서 파일 생성을 요청하면 이 도구를 사용한다. query/status/match_status/sort/limit 조건은 list_inventory_items와 동일하게 적용된다. 생성 파일에는 품명, 품번, 현재고, 필수재고, 재고확인상태, 매칭상태, 단가, 구매 우선순위, 구매판단, 출고합계, 이동 순증감이 포함된다.",
+                    "parameters": [
+                        {
+                            "name": "query",
+                            "in": "query",
+                            "required": false,
+                            "schema": { "type": "string" },
+                            "description": "품목명 또는 품번 키워드"
+                        },
+                        {
+                            "name": "status",
+                            "in": "query",
+                            "required": false,
+                            "schema": {
+                                "type": "string",
+                                "enum": ["all", "shortage", "sufficient", "out_of_stock", "unverified", "confirmed"]
+                            },
+                            "description": "재고 상태 필터"
+                        },
+                        {
+                            "name": "match_status",
+                            "in": "query",
+                            "required": false,
+                            "schema": {
+                                "type": "string",
+                                "enum": ["matched_all", "stock_inbound", "stock_outbound", "stock_only", "movement_only", "inbound_only", "outbound_only", "unclassified"]
+                            },
+                            "description": "재고/입고/출고 매칭 상태 필터"
+                        },
+                        {
+                            "name": "sort",
+                            "in": "query",
+                            "required": false,
+                            "schema": {
+                                "type": "string",
+                                "default": "priority",
+                                "enum": ["priority", "consumption", "net_decrease", "shortage", "stock", "name", "outbound"]
+                            },
+                            "description": "정렬 기준"
+                        },
+                        {
+                            "name": "limit",
+                            "in": "query",
+                            "required": false,
+                            "schema": { "type": "integer", "default": 500 },
+                            "description": "최대 보고서 행 수"
+                        }
+                    ],
+                    "responses": {
+                        "200": {
+                            "description": "Inventory report generated"
+                        }
+                    }
+                }
+            },
             "/document/legacy/item-context": {
                 "get": {
                     "operationId": "get_item_document_context",
@@ -571,6 +817,195 @@ async fn openapi_spec() -> Json<serde_json::Value> {
                         }
                     }
                 }
+            },
+            "/document/pdf/render": {
+                "post": {
+                    "operationId": "render_markdown_pdf",
+                    "summary": "Markdown 보고서를 PDF 파일로 생성",
+                    "description": "사용자가 수리 완료 보고서, 업무 보고, 회의록, 분석 결과, 요약문을 PDF 또는 형식이 지정되지 않은 문서 파일로 요청하면 Markdown 본문을 이 도구에 전달해 PDF 다운로드 링크를 생성한다. 사용자가 Word/DOCX 또는 Excel/XLSX를 명시하면 이 도구가 아니라 해당 형식의 렌더링 도구를 호출한다. 제목은 title에만 넣고 markdown 첫 줄에 같은 제목을 반복하지 않는다. 본문은 생성 정보, 개요, 세부 내용, 표/목록, 결론 또는 조치사항 순서로 정리한다. PDF를 직접 생성할 수 없다고 답하지 말고 이 도구를 호출한다. 구매 품의서 자체 DOCX/ZIP 생성은 구매 품의서 전용 도구를 사용하고, 보고용 PDF는 이 도구를 사용한다.",
+                    "requestBody": {
+                        "required": true,
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "type": "object",
+                                    "required": ["title", "markdown"],
+                                    "properties": {
+                                        "title": {
+                                            "type": "string",
+                                            "description": "보고서 제목",
+                                            "example": "엘리베이터 5기 수리 및 점검 세부 내역 보고서"
+                                        },
+                                        "markdown": {
+                                            "type": "string",
+                                            "description": "PDF로 렌더링할 Markdown 보고서 본문"
+                                        },
+                                        "file_name": {
+                                            "type": ["string", "null"],
+                                            "description": "선택 PDF 파일명",
+                                            "example": "elevator_repair_report.pdf"
+                                        },
+                                        "page_size": {
+                                            "type": ["string", "null"],
+                                            "default": "A4",
+                                            "enum": ["A4", "Letter", null]
+                                        },
+                                        "orientation": {
+                                            "type": ["string", "null"],
+                                            "default": "portrait",
+                                            "enum": ["portrait", "landscape", null]
+                                        },
+                                        "generated_for": {
+                                            "type": ["string", "null"],
+                                            "description": "문서 생성 대상자 이름. 알고 있는 현재 사용자/요청자 이름을 넣는다."
+                                        },
+                                        "account_name": {
+                                            "type": ["string", "null"],
+                                            "description": "문서를 요청한 계정 이름"
+                                        },
+                                        "account_email": {
+                                            "type": ["string", "null"],
+                                            "description": "문서를 요청한 계정 이메일"
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    },
+                    "responses": {
+                        "200": {
+                            "description": "PDF rendered through the internal Markdown PDF service"
+                        }
+                    }
+                }
+            },
+            "/document/chat/docx": {
+                "post": {
+                    "operationId": "render_chat_docx",
+                    "summary": "본문 또는 채팅 기록을 Word DOCX 파일로 내보내기",
+                    "description": "사용자가 보고서, 요약문, 업무보고, 재고현황 보고서, 현재 대화 내용, 채팅 기록, 이전 답변을 워드 파일, Word 파일, DOCX 문서로 요청하면 작성한 본문을 transcript에 넣거나 messages를 전달해 DOCX 다운로드 링크를 생성한다. 제목은 title에만 넣고 transcript 첫 줄에 같은 제목을 반복하지 않는다. Word 출력에는 Markdown 문법 기호가 남지 않으며 Markdown 표는 실제 Word 표로 렌더링된다. title만 전달하지 않는다. 구매 품의서 템플릿 DOCX 생성에는 사용하지 않는다.",
+                    "requestBody": {
+                        "required": true,
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "type": "object",
+                                    "required": ["title", "transcript"],
+                                    "properties": {
+                                        "title": {
+                                            "type": "string",
+                                            "description": "문서 제목"
+                                        },
+                                        "messages": {
+                                            "type": "array",
+                                            "description": "내보낼 채팅 메시지 목록",
+                                            "items": {
+                                                "type": "object",
+                                                "required": ["role", "content"],
+                                                "properties": {
+                                                    "role": { "type": "string" },
+                                                    "content": { "type": "string" },
+                                                    "name": { "type": ["string", "null"] },
+                                                    "created_at": { "type": ["string", "null"] }
+                                                }
+                                            }
+                                        },
+                                        "transcript": {
+                                            "type": "string",
+                                            "description": "Word 문서에 넣을 보고서 본문 또는 messages 대신 사용할 전체 채팅 전문. 빈 값으로 보내지 않는다."
+                                        },
+                                        "file_name": {
+                                            "type": ["string", "null"],
+                                            "description": "선택 DOCX 파일명",
+                                            "example": "chat_export.docx"
+                                        },
+                                        "generated_for": {
+                                            "type": ["string", "null"],
+                                            "description": "문서 생성 대상자 이름. 알고 있는 현재 사용자/요청자 이름을 넣는다."
+                                        },
+                                        "account_name": {
+                                            "type": ["string", "null"],
+                                            "description": "문서를 요청한 계정 이름"
+                                        },
+                                        "account_email": {
+                                            "type": ["string", "null"],
+                                            "description": "문서를 요청한 계정 이메일"
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    },
+                    "responses": {
+                        "200": {
+                            "description": "Chat DOCX rendered through the internal document renderer"
+                        }
+                    }
+                }
+            },
+            "/document/chat/xlsx": {
+                "post": {
+                    "operationId": "render_chat_xlsx",
+                    "summary": "본문 또는 채팅 기록을 Excel XLSX 파일로 내보내기",
+                    "description": "사용자가 보고서, 요약문, 업무보고, 재고현황 보고서, 현재 대화 내용, 채팅 기록, 이전 답변을 엑셀 파일, Excel 파일, XLSX 문서로 요청하면 표 형식 본문을 transcript에 넣거나 messages를 전달해 XLSX 다운로드 링크를 생성한다. 제목은 title에만 넣고 transcript 첫 줄에 같은 제목을 반복하지 않는다. Excel 출력에는 Markdown 문법 기호가 남지 않으며 Markdown 표는 실제 행/열로 렌더링된다. title만 전달하지 않는다.",
+                    "requestBody": {
+                        "required": true,
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "type": "object",
+                                    "required": ["title", "transcript"],
+                                    "properties": {
+                                        "title": {
+                                            "type": "string",
+                                            "description": "문서 제목"
+                                        },
+                                        "messages": {
+                                            "type": "array",
+                                            "description": "내보낼 채팅 메시지 목록",
+                                            "items": {
+                                                "type": "object",
+                                                "required": ["role", "content"],
+                                                "properties": {
+                                                    "role": { "type": "string" },
+                                                    "content": { "type": "string" },
+                                                    "name": { "type": ["string", "null"] },
+                                                    "created_at": { "type": ["string", "null"] }
+                                                }
+                                            }
+                                        },
+                                        "transcript": {
+                                            "type": "string",
+                                            "description": "Excel 파일에 넣을 보고서 본문 또는 messages 대신 사용할 전체 채팅 전문. 빈 값으로 보내지 않는다."
+                                        },
+                                        "file_name": {
+                                            "type": ["string", "null"],
+                                            "description": "선택 XLSX 파일명",
+                                            "example": "chat_export.xlsx"
+                                        },
+                                        "generated_for": {
+                                            "type": ["string", "null"],
+                                            "description": "문서 생성 대상자 이름. 알고 있는 현재 사용자/요청자 이름을 넣는다."
+                                        },
+                                        "account_name": {
+                                            "type": ["string", "null"],
+                                            "description": "문서를 요청한 계정 이름"
+                                        },
+                                        "account_email": {
+                                            "type": ["string", "null"],
+                                            "description": "문서를 요청한 계정 이메일"
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    },
+                    "responses": {
+                        "200": {
+                            "description": "Chat XLSX rendered through the internal document renderer"
+                        }
+                    }
+                }
             }
         }
     }))
@@ -595,6 +1030,11 @@ fn app_router() -> Router {
             post(generate_legacy_document_package),
         )
         .route("/document/legacy/shortages", get(list_legacy_shortages))
+        .route("/document/legacy/items", get(list_legacy_inventory_items))
+        .route(
+            "/document/legacy/items/report",
+            get(export_legacy_inventory_report),
+        )
         .route(
             "/document/legacy/item-context",
             get(get_legacy_item_context),
@@ -607,6 +1047,11 @@ fn app_router() -> Router {
             "/document/legacy/item-approve",
             post(approve_legacy_item_document),
         )
+        .route("/document/pdf/render", post(render_markdown_pdf_proxy))
+        .route("/document/chat/docx", post(render_chat_docx_proxy))
+        .route("/document/chat/xlsx", post(render_chat_xlsx_proxy))
+        .route("/document/file/download", get(download_markdown_pdf_proxy))
+        .route("/document/pdf/download", get(download_markdown_pdf_proxy))
         .with_state(build_state())
         .layer(cors)
         .layer(TraceLayer::new_for_http())
@@ -632,6 +1077,7 @@ fn build_state() -> AppState {
     AppState {
         templates: Arc::new(templates),
         sessions: Arc::new(RwLock::new(HashMap::new())),
+        download_grants: Arc::new(RwLock::new(HashMap::new())),
         legacy_workdir: std::env::var("PORT_PROJECT_LEGACY_WORKDIR")
             .ok()
             .map(PathBuf::from)
@@ -641,13 +1087,20 @@ fn build_state() -> AppState {
             .unwrap_or_else(|_| "http://127.0.0.1:8001".to_string())
             .trim_end_matches('/')
             .to_string(),
+        markdown_pdf_base_url: std::env::var("MARKDOWN_PDF_INTERNAL_BASE_URL")
+            .unwrap_or_else(|_| "http://markdown-pdf-service:8003".to_string())
+            .trim_end_matches('/')
+            .to_string(),
+        http_client: reqwest::Client::new(),
     }
 }
 
 async fn create_document(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Json(req): Json<CreateRequest>,
 ) -> Result<Json<CreateResponse>, AppError> {
+    let _user = require_registered_tool_user(&headers)?;
     let template = template_for(&state, &req.template_id)?;
     let session_id = Uuid::new_v4().to_string();
 
@@ -681,8 +1134,10 @@ async fn create_document(
 
 async fn fill_document(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Json(req): Json<FillRequest>,
 ) -> Result<Json<FillResponse>, AppError> {
+    let _user = require_registered_tool_user(&headers)?;
     let template = template_for(&state, &req.template_id)?;
     let mut merged_fields = req.current_fields.clone();
 
@@ -727,8 +1182,10 @@ async fn fill_document(
 
 async fn export_document(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Json(req): Json<ExportRequest>,
 ) -> Result<Json<ExportResponse>, AppError> {
+    let _user = require_registered_tool_user(&headers)?;
     let template = template_for(&state, &req.template_id)?;
     let mut fields = req.fields.clone();
     enrich_purchase_request_from_snapshot(&state, "", &mut fields)?;
@@ -778,8 +1235,10 @@ async fn export_document(
 
 async fn run_legacy_document_batch(
     State(state): State<AppState>,
+    headers: HeaderMap,
     payload: Option<Json<LegacyRunRequest>>,
 ) -> Result<Json<LegacyRunResponse>, AppError> {
+    let _user = require_registered_tool_user(&headers)?;
     let workdir = state
         .legacy_workdir
         .clone()
@@ -796,6 +1255,7 @@ async fn download_legacy_document(
     State(state): State<AppState>,
     Query(query): Query<LegacyDownloadQuery>,
 ) -> Result<impl IntoResponse, AppError> {
+    let _user = validate_download_grant(&state, &query.path, &query.token).await?;
     let workdir = state
         .legacy_workdir
         .clone()
@@ -828,6 +1288,7 @@ async fn download_legacy_document(
         "docx" => "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
         "json" => "application/json",
         "zip" => "application/zip",
+        "csv" => "text/csv; charset=utf-8",
         "txt" | "log" => "text/plain; charset=utf-8",
         _ => "application/octet-stream",
     };
@@ -852,8 +1313,10 @@ async fn download_legacy_document(
 
 async fn generate_legacy_document_package(
     State(state): State<AppState>,
+    headers: HeaderMap,
     payload: Option<Json<LegacyRunRequest>>,
 ) -> Result<Json<LegacyPackageResponse>, AppError> {
+    let user = require_registered_tool_user(&headers)?;
     let workdir = state
         .legacy_workdir
         .clone()
@@ -876,10 +1339,8 @@ async fn generate_legacy_document_package(
         .map_err(|err| AppError::bad_request(format!("failed to create ZIP package: {err}")))?;
 
     let zip_path = zip_relative.to_string_lossy().to_string();
-    let download_path = format!(
-        "/document/legacy/download?path={}",
-        url_encode_query_value(&zip_path)
-    );
+    let download_path =
+        issue_download_path(&state, "/document/legacy/download", &zip_path, &user).await;
     let download_url = format!("{}{download_path}", state.public_base_url);
     let generated_files_preview = run
         .generated_files
@@ -912,8 +1373,10 @@ async fn generate_legacy_document_package(
 
 async fn list_legacy_shortages(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Query(query): Query<LegacyShortagesQuery>,
 ) -> Result<Json<LegacyShortagesResponse>, AppError> {
+    let _user = require_registered_tool_user(&headers)?;
     let snapshot = load_latest_snapshot_json(&state)?;
     let snapshot_json_path = current_snapshot_json_path(&state)?;
     let snapshot_date = snapshot
@@ -1003,10 +1466,121 @@ async fn list_legacy_shortages(
     }))
 }
 
+async fn list_legacy_inventory_items(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(query): Query<LegacyInventoryQuery>,
+) -> Result<Json<LegacyInventoryResponse>, AppError> {
+    let _user = require_registered_tool_user(&headers)?;
+    let snapshot = load_latest_snapshot_json(&state)?;
+    let snapshot_json_path = current_snapshot_json_path(&state)?;
+    let snapshot_date = snapshot
+        .get("meta")
+        .and_then(|meta| meta.get("snapshot_date"))
+        .and_then(|value| value.as_str())
+        .map(|value| value.to_string());
+    let (items, total_count) = collect_inventory_items(&snapshot, &query, 50, 500)?;
+    let markdown_table = build_inventory_markdown_table(&items);
+    let returned_count = items.len();
+
+    Ok(Json(LegacyInventoryResponse {
+        data_source: "processed_snapshot_json".into(),
+        source_policy: "현재 조회는 전처리 완료된 stock_in_out_monthly.json 스냅샷만 기준으로 합니다. 원천 입고/재고/출고 엑셀은 배치 생성용 입력 데이터이며 직접 조회 근거로 사용하지 않습니다.".into(),
+        snapshot_json_path,
+        snapshot_date,
+        total_count,
+        returned_count,
+        filter_options: LegacyInventoryFilterOptions {
+            status: vec![
+                "all",
+                "shortage",
+                "sufficient",
+                "out_of_stock",
+                "unverified",
+                "confirmed",
+            ],
+            match_status: vec![
+                "matched_all",
+                "stock_inbound",
+                "stock_outbound",
+                "stock_only",
+                "movement_only",
+                "inbound_only",
+                "outbound_only",
+                "unclassified",
+            ],
+            sort: vec![
+                "priority",
+                "consumption",
+                "net_decrease",
+                "shortage",
+                "stock",
+                "name",
+                "outbound",
+            ],
+        },
+        markdown_table,
+        items,
+    }))
+}
+
+async fn export_legacy_inventory_report(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(query): Query<LegacyInventoryQuery>,
+) -> Result<Json<LegacyInventoryReportResponse>, AppError> {
+    let user = require_registered_tool_user(&headers)?;
+    let workdir = state
+        .legacy_workdir
+        .clone()
+        .ok_or_else(|| AppError::bad_request("legacy workdir is not configured".into()))?;
+    let snapshot = load_latest_snapshot_json(&state)?;
+    let (items, _total_count) = collect_inventory_items(&snapshot, &query, 500, 5_000)?;
+    let csv = build_inventory_report_csv(&items);
+
+    let file_name = format!(
+        "inventory_report_{}.csv",
+        Utc::now().format("%Y%m%d_%H%M%S")
+    );
+    let relative = PathBuf::from("output")
+        .join("inventory_reports")
+        .join(&file_name);
+    let absolute = workdir.join(&relative);
+    if let Some(parent) = absolute.parent() {
+        fs::create_dir_all(parent).map_err(|err| {
+            AppError::bad_request(format!(
+                "failed to create inventory report directory: {err}"
+            ))
+        })?;
+    }
+    fs::write(&absolute, csv)
+        .map_err(|err| AppError::bad_request(format!("failed to write inventory report: {err}")))?;
+
+    let output_path = relative.to_string_lossy().to_string();
+    let download_path =
+        issue_download_path(&state, "/document/legacy/download", &output_path, &user).await;
+    let download_url = format!("{}{download_path}", state.public_base_url);
+    let assistant_summary = format!(
+        "재고 현황 보고서 파일을 생성했습니다. 총 {}개 품목이 포함되었고, 다운로드 링크는 {} 입니다.",
+        items.len(), download_url
+    );
+
+    Ok(Json(LegacyInventoryReportResponse {
+        output_path,
+        download_path,
+        download_url,
+        file_name,
+        generated_count: items.len(),
+        assistant_summary,
+    }))
+}
+
 async fn get_legacy_item_context(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Query(query): Query<LegacyItemContextQuery>,
 ) -> Result<Json<LegacyItemContextResponse>, AppError> {
+    let _user = require_registered_tool_user(&headers)?;
     let snapshot_json_path = current_snapshot_json_path(&state)?;
     let part = resolve_snapshot_part(&state, query.part_name.as_deref(), query.part_no.as_deref())?;
     let part_name = part
@@ -1067,10 +1641,9 @@ async fn get_legacy_item_context(
         "부품역할".into(),
         serde_json::Value::String("(직접입력)".into()),
     );
-    fields_seed.insert(
-        "납품업체".into(),
-        serde_json::Value::String("(직접입력)".into()),
-    );
+    fields_seed
+        .entry("신규 거래업체".into())
+        .or_insert_with(|| serde_json::Value::String("(직접입력)".into()));
 
     let guided_fields = build_guided_fields_for_purchase_request(&fields_seed);
 
@@ -1094,8 +1667,10 @@ async fn get_legacy_item_context(
 
 async fn export_legacy_item_document(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Json(req): Json<LegacyItemExportRequest>,
 ) -> Result<Json<LegacyItemExportResponse>, AppError> {
+    let user = require_registered_tool_user(&headers)?;
     let workdir = state
         .legacy_workdir
         .clone()
@@ -1137,10 +1712,8 @@ async fn export_legacy_item_document(
         .map_err(|err| AppError::bad_request(format!("failed to write single document: {err}")))?;
 
     let output_path = relative.to_string_lossy().to_string();
-    let download_path = format!(
-        "/document/legacy/download?path={}",
-        url_encode_query_value(&output_path)
-    );
+    let download_path =
+        issue_download_path(&state, "/document/legacy/download", &output_path, &user).await;
     let download_url = format!("{}{download_path}", state.public_base_url);
     let assistant_summary = format!(
         "단건 구매 품의 문서를 생성했습니다. 템플릿 경로는 {} 이고, 다운로드 링크는 {} 입니다.",
@@ -1162,8 +1735,10 @@ async fn export_legacy_item_document(
 
 async fn approve_legacy_item_document(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Json(req): Json<LegacyApproveRequest>,
 ) -> Result<Json<LegacyApproveResponse>, AppError> {
+    let user = require_registered_tool_user(&headers)?;
     let workdir = state
         .legacy_workdir
         .clone()
@@ -1194,8 +1769,8 @@ async fn approve_legacy_item_document(
     let snapshot_json_path = current_snapshot_json_path(&state)?;
     merge_snapshot_part_into_fields(&mut fields, &part, Some(snapshot_json_path.as_str()));
     fields
-        .entry("납품업체".into())
-        .or_insert_with(|| serde_json::Value::String("지정 협력사".into()));
+        .entry("신규 거래업체".into())
+        .or_insert_with(|| serde_json::Value::String("(직접입력)".into()));
     fields
         .entry("제조사".into())
         .or_insert_with(|| serde_json::Value::String("기존 등록 제조사 기준".into()));
@@ -1267,10 +1842,8 @@ async fn approve_legacy_item_document(
     })?;
 
     let output_path = relative.to_string_lossy().to_string();
-    let download_path = format!(
-        "/document/legacy/download?path={}",
-        url_encode_query_value(&output_path)
-    );
+    let download_path =
+        issue_download_path(&state, "/document/legacy/download", &output_path, &user).await;
     let download_url = format!("{}{download_path}", state.public_base_url);
     let assistant_summary = format!(
         "{} ({}) 품목에 대해 가격 기준 문서 생성 방침을 적용하여 최종 문서를 생성했습니다. 초안을 검토한 뒤 다운로드 링크 {} 에서 파일을 받을 수 있습니다.",
@@ -1291,6 +1864,154 @@ async fn approve_legacy_item_document(
             .to_string(),
         assistant_summary,
     }))
+}
+
+async fn render_markdown_pdf_proxy(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(mut req): Json<RenderMarkdownPdfRequest>,
+) -> Result<Json<RenderMarkdownPdfResponse>, AppError> {
+    let user = require_registered_tool_user(&headers)?;
+    apply_render_user_defaults(&mut req, &user);
+    let endpoint = format!("{}/render/markdown-pdf", state.markdown_pdf_base_url);
+    let request = authenticated_upstream_request(state.http_client.post(&endpoint), &user)?;
+    let response = request
+        .json(&req)
+        .send()
+        .await
+        .map_err(|err| {
+            AppError::bad_request(format!("failed to call markdown PDF service: {err}"))
+        })?;
+    let mut upstream = parse_renderer_response(response, "markdown PDF service").await?;
+
+    if let Some(encoded_path) = extract_markdown_pdf_download_path(&upstream.download_path) {
+        let decoded_path = url_decode_query_value(&encoded_path);
+        upstream.download_path =
+            issue_download_path(&state, "/document/pdf/download", &decoded_path, &user).await;
+        upstream.download_url = format!("{}{}", state.public_base_url, upstream.download_path);
+        upstream.assistant_summary = format!(
+            "{} PDF 파일을 생성했습니다. 다운로드 링크는 {} 입니다.",
+            upstream.title, upstream.download_url
+        );
+    }
+
+    Ok(Json(upstream))
+}
+
+async fn render_chat_docx_proxy(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(req): Json<RenderChatDocumentRequest>,
+) -> Result<Json<RenderMarkdownPdfResponse>, AppError> {
+    let user = require_registered_tool_user(&headers)?;
+    render_chat_document_proxy(state, req, "chat-docx", "Word", user).await
+}
+
+async fn render_chat_xlsx_proxy(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(req): Json<RenderChatDocumentRequest>,
+) -> Result<Json<RenderMarkdownPdfResponse>, AppError> {
+    let user = require_registered_tool_user(&headers)?;
+    render_chat_document_proxy(state, req, "chat-xlsx", "Excel", user).await
+}
+
+async fn render_chat_document_proxy(
+    state: AppState,
+    mut req: RenderChatDocumentRequest,
+    kind: &str,
+    label: &str,
+    user: RegisteredUser,
+) -> Result<Json<RenderMarkdownPdfResponse>, AppError> {
+    apply_chat_document_user_defaults(&mut req, &user);
+    let has_transcript = req
+        .transcript
+        .as_deref()
+        .map(str::trim)
+        .map(|value| !value.is_empty())
+        .unwrap_or(false);
+    let has_message = req
+        .messages
+        .iter()
+        .any(|message| !message.content.trim().is_empty());
+    if !has_transcript && !has_message {
+        return Err(AppError::bad_request(format!(
+            "{label} document content is required: provide transcript or messages"
+        )));
+    }
+
+    let endpoint = format!("{}/render/{kind}", state.markdown_pdf_base_url);
+    let request = authenticated_upstream_request(state.http_client.post(&endpoint), &user)?;
+    let response = request
+        .json(&req)
+        .send()
+        .await
+        .map_err(|err| {
+            AppError::bad_request(format!("failed to call renderer service: {err}"))
+        })?;
+    let mut upstream = parse_renderer_response(response, "renderer service").await?;
+
+    if let Some(encoded_path) = extract_markdown_pdf_download_path(&upstream.download_path) {
+        let decoded_path = url_decode_query_value(&encoded_path);
+        upstream.download_path =
+            issue_download_path(&state, "/document/file/download", &decoded_path, &user).await;
+        upstream.download_url = format!("{}{}", state.public_base_url, upstream.download_path);
+        upstream.assistant_summary = format!(
+            "{} {label} 파일을 생성했습니다. 다운로드 링크는 {} 입니다.",
+            upstream.title, upstream.download_url
+        );
+    }
+
+    Ok(Json(upstream))
+}
+
+async fn download_markdown_pdf_proxy(
+    State(state): State<AppState>,
+    Query(query): Query<MarkdownPdfDownloadQuery>,
+) -> Result<impl IntoResponse, AppError> {
+    let user = validate_download_grant(&state, &query.path, &query.token).await?;
+    let endpoint = format!(
+        "{}/download?path={}",
+        state.markdown_pdf_base_url,
+        url_encode_query_value(&query.path)
+    );
+    let request = authenticated_upstream_request(state.http_client.get(&endpoint), &user)?;
+    let response = request
+        .send()
+        .await
+        .map_err(|err| {
+            AppError::bad_request(format!("failed to download markdown PDF file: {err}"))
+        })?
+        .error_for_status()
+        .map_err(|err| AppError::bad_request(format!("rendered file download error: {err}")))?;
+
+    let bytes = response.bytes().await.map_err(|err| {
+        AppError::bad_request(format!("failed to read rendered file bytes: {err}"))
+    })?;
+    let file_name = Path::new(&query.path)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("download.bin");
+
+    Ok((
+        [
+            (
+                CONTENT_TYPE,
+                HeaderValue::from_static(media_type_for_download(file_name)),
+            ),
+            (
+                CONTENT_DISPOSITION,
+                HeaderValue::from_str(&format!(
+                    "attachment; filename*=UTF-8''{}",
+                    url_encode_filename(file_name)
+                ))
+                .map_err(|err| {
+                    AppError::bad_request(format!("failed to build content disposition: {err}"))
+                })?,
+            ),
+        ],
+        bytes,
+    ))
 }
 
 fn template_for<'a>(
@@ -1599,7 +2320,11 @@ fn build_legacy_row(
         replacement_dates,
         replacement_qtys,
         replacement_hosts,
-        vendor_name: as_string(fields.get("납품업체"), "기록없음"),
+        vendor_name: first_string_field(
+            fields,
+            &["이전구매업체", "구거래처", "구-거래처", "납품업체"],
+            "기록없음",
+        ),
         manufacturer_name: as_string(fields.get("제조사"), "기록없음"),
         unit: as_string(fields.get("단위"), "기록없음"),
         unit_price: as_string(fields.get("단가"), "기록없음"),
@@ -1636,6 +2361,26 @@ fn try_render_legacy_docx(
     Ok(None)
 }
 
+fn first_string_field(
+    fields: &BTreeMap<String, serde_json::Value>,
+    keys: &[&str],
+    fallback: &str,
+) -> String {
+    for key in keys {
+        let value = as_string(fields.get(*key), "");
+        let trimmed = value.trim();
+        if !trimmed.is_empty()
+            && !matches!(
+                trimmed,
+                "기록없음" | "(직접입력)" | "(직접기입)" | "(미입력)"
+            )
+        {
+            return value;
+        }
+    }
+    fallback.to_string()
+}
+
 #[derive(Debug)]
 struct AppError {
     status: StatusCode,
@@ -1648,6 +2393,264 @@ impl AppError {
             status: StatusCode::BAD_REQUEST,
             message,
         }
+    }
+
+    fn unauthorized(message: String) -> Self {
+        Self {
+            status: StatusCode::UNAUTHORIZED,
+            message,
+        }
+    }
+
+    fn forbidden(message: String) -> Self {
+        Self {
+            status: StatusCode::FORBIDDEN,
+            message,
+        }
+    }
+
+    fn internal(message: String) -> Self {
+        Self {
+            status: StatusCode::INTERNAL_SERVER_ERROR,
+            message,
+        }
+    }
+}
+
+fn internal_token_configured() -> bool {
+    std::env::var("PORT_PROJECT_INTERNAL_TOKEN")
+        .ok()
+        .map(|value| !value.trim().is_empty())
+        .unwrap_or(false)
+}
+
+fn configured_internal_token() -> Result<String, AppError> {
+    let token = std::env::var("PORT_PROJECT_INTERNAL_TOKEN")
+        .unwrap_or_default()
+        .trim()
+        .to_string();
+    if token.is_empty() {
+        if cfg!(test) {
+            return Ok(String::new());
+        }
+        return Err(AppError::internal(
+            "PORT_PROJECT_INTERNAL_TOKEN is not configured".into(),
+        ));
+    }
+    Ok(token)
+}
+
+fn constant_time_eq(left: &str, right: &str) -> bool {
+    let left = left.as_bytes();
+    let right = right.as_bytes();
+    if left.len() != right.len() {
+        return false;
+    }
+    let mut diff = 0u8;
+    for (a, b) in left.iter().zip(right.iter()) {
+        diff |= a ^ b;
+    }
+    diff == 0
+}
+
+fn header_string(headers: &HeaderMap, name: &str) -> String {
+    headers
+        .get(name)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("")
+        .trim()
+        .to_string()
+}
+
+fn require_internal_request(headers: &HeaderMap) -> Result<(), AppError> {
+    let expected = configured_internal_token()?;
+    if expected.is_empty() && cfg!(test) {
+        return Ok(());
+    }
+    let supplied = header_string(headers, INTERNAL_TOKEN_HEADER);
+    if !constant_time_eq(&supplied, &expected) {
+        return Err(AppError::forbidden("invalid internal tool token".into()));
+    }
+    Ok(())
+}
+
+fn require_registered_tool_user(headers: &HeaderMap) -> Result<RegisteredUser, AppError> {
+    require_internal_request(headers)?;
+    if cfg!(test) && !internal_token_configured() {
+        return Ok(RegisteredUser {
+            id: "unit-test-user".into(),
+            email: "unit-test@example.local".into(),
+            name: "unit-test".into(),
+        });
+    }
+
+    let email = header_string(headers, OPEN_WEBUI_USER_EMAIL_HEADER).to_lowercase();
+    let id = header_string(headers, OPEN_WEBUI_USER_ID_HEADER);
+    let name = header_string(headers, OPEN_WEBUI_USER_NAME_HEADER);
+    if email.is_empty() || id.is_empty() {
+        return Err(AppError::unauthorized(
+            "registered Open WebUI account is required".into(),
+        ));
+    }
+
+    Ok(RegisteredUser {
+        id,
+        email: email.clone(),
+        name: if name.is_empty() { email } else { name },
+    })
+}
+
+fn download_token_ttl_seconds() -> i64 {
+    std::env::var("PORT_PROJECT_DOWNLOAD_TOKEN_TTL_SECONDS")
+        .ok()
+        .and_then(|raw| raw.parse::<i64>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(DEFAULT_DOWNLOAD_TOKEN_TTL_SECONDS)
+}
+
+async fn issue_download_path(
+    state: &AppState,
+    route: &str,
+    path: &str,
+    user: &RegisteredUser,
+) -> String {
+    let token = Uuid::new_v4().to_string();
+    let expires_at = Utc::now().timestamp() + download_token_ttl_seconds();
+    {
+        let mut grants = state.download_grants.write().await;
+        let now = Utc::now().timestamp();
+        grants.retain(|_, grant| grant.expires_at > now);
+        grants.insert(
+            token.clone(),
+            DownloadGrant {
+                path: path.to_string(),
+                user: user.clone(),
+                expires_at,
+            },
+        );
+    }
+
+    format!(
+        "{route}?path={}&token={}",
+        url_encode_query_value(path),
+        url_encode_query_value(&token)
+    )
+}
+
+async fn validate_download_grant(
+    state: &AppState,
+    path: &str,
+    token: &str,
+) -> Result<RegisteredUser, AppError> {
+    if token.trim().is_empty() {
+        return Err(AppError::unauthorized("download token is required".into()));
+    }
+
+    let mut grants = state.download_grants.write().await;
+    let now = Utc::now().timestamp();
+    grants.retain(|_, grant| grant.expires_at > now);
+    let Some(grant) = grants.get(token) else {
+        return Err(AppError::forbidden("invalid download token".into()));
+    };
+    if grant.path != path {
+        return Err(AppError::forbidden("invalid download token".into()));
+    }
+    Ok(grant.user.clone())
+}
+
+fn apply_render_user_defaults(req: &mut RenderMarkdownPdfRequest, user: &RegisteredUser) {
+    if req.generated_for.as_deref().map(str::trim).unwrap_or("").is_empty() {
+        req.generated_for = Some(user.name.clone());
+    }
+    if req.account_name.as_deref().map(str::trim).unwrap_or("").is_empty() {
+        req.account_name = Some(user.name.clone());
+    }
+    if req.account_email.as_deref().map(str::trim).unwrap_or("").is_empty() {
+        req.account_email = Some(user.email.clone());
+    }
+}
+
+fn apply_chat_document_user_defaults(req: &mut RenderChatDocumentRequest, user: &RegisteredUser) {
+    if req.generated_for.as_deref().map(str::trim).unwrap_or("").is_empty() {
+        req.generated_for = Some(user.name.clone());
+    }
+    if req.account_name.as_deref().map(str::trim).unwrap_or("").is_empty() {
+        req.account_name = Some(user.name.clone());
+    }
+    if req.account_email.as_deref().map(str::trim).unwrap_or("").is_empty() {
+        req.account_email = Some(user.email.clone());
+    }
+}
+
+fn authenticated_upstream_request(
+    builder: reqwest::RequestBuilder,
+    user: &RegisteredUser,
+) -> Result<reqwest::RequestBuilder, AppError> {
+    Ok(builder
+        .header(INTERNAL_TOKEN_HEADER, configured_internal_token()?)
+        .header(OPEN_WEBUI_USER_ID_HEADER, user.id.as_str())
+        .header(OPEN_WEBUI_USER_EMAIL_HEADER, user.email.as_str())
+        .header(OPEN_WEBUI_USER_NAME_HEADER, user.name.as_str()))
+}
+
+async fn parse_renderer_response(
+    response: reqwest::Response,
+    label: &str,
+) -> Result<RenderMarkdownPdfResponse, AppError> {
+    let status = response.status();
+    let body = response.text().await.map_err(|err| {
+        AppError::bad_request(format!("failed to read {label} response body: {err}"))
+    })?;
+
+    if !status.is_success() {
+        return Err(AppError::bad_request(format!(
+            "{label} error: HTTP {status}: {body}"
+        )));
+    }
+
+    serde_json::from_str(&body).map_err(|err| {
+        AppError::bad_request(format!(
+            "failed to parse {label} response: {err}; body: {body}"
+        ))
+    })
+}
+
+fn url_decode_query_value(value: &str) -> String {
+    let bytes = value.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut idx = 0usize;
+    while idx < bytes.len() {
+        match bytes[idx] {
+            b'%' if idx + 2 < bytes.len() => {
+                let hi = hex_value(bytes[idx + 1]);
+                let lo = hex_value(bytes[idx + 2]);
+                if let (Some(hi), Some(lo)) = (hi, lo) {
+                    out.push((hi << 4) | lo);
+                    idx += 3;
+                    continue;
+                }
+                out.push(bytes[idx]);
+                idx += 1;
+            }
+            b'+' => {
+                out.push(b' ');
+                idx += 1;
+            }
+            byte => {
+                out.push(byte);
+                idx += 1;
+            }
+        }
+    }
+    String::from_utf8(out).unwrap_or_else(|_| value.to_string())
+}
+
+fn hex_value(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
     }
 }
 
@@ -1875,6 +2878,12 @@ fn merge_snapshot_part_into_fields(
         .and_then(|value| value.as_object())
     {
         if let Some(vendor_name) = snapshot_context_text(document_context.get("vendor_name")) {
+            fields
+                .entry("이전구매업체".into())
+                .or_insert_with(|| serde_json::Value::String(vendor_name.clone()));
+            fields
+                .entry("구거래처".into())
+                .or_insert_with(|| serde_json::Value::String(vendor_name.clone()));
             fields
                 .entry("납품업체".into())
                 .or_insert_with(|| serde_json::Value::String(vendor_name));
@@ -2143,6 +3152,16 @@ fn part_required_stock(part: &serde_json::Value) -> Option<f64> {
 fn part_available_stock(part: &serde_json::Value) -> Option<f64> {
     part.get("available_stock_qty")
         .and_then(snapshot_context_number)
+}
+
+fn part_unit_price(part: &serde_json::Value) -> Option<f64> {
+    part.get("unit_price")
+        .and_then(snapshot_context_number)
+        .or_else(|| {
+            part.get("document_context")
+                .and_then(|value| value.get("unit_price"))
+                .and_then(snapshot_context_number)
+        })
 }
 
 fn part_shortage_gap(part: &serde_json::Value) -> Option<f64> {
@@ -2461,6 +3480,7 @@ fn build_shortage_item(part: &serde_json::Value) -> Option<LegacyShortageItem> {
         .get("outbound_count")
         .and_then(|value| value.as_u64())
         .unwrap_or(0) as usize;
+    let unit_price = part_unit_price(part);
 
     if !inventory_confirmed {
         return None;
@@ -2492,6 +3512,15 @@ fn build_shortage_item(part: &serde_json::Value) -> Option<LegacyShortageItem> {
         ),
     };
     let document_request_hint = format!("{part_name} ({part_no}) 품목으로 구매 품의 문서 작성해줘");
+    let purchase_priority = determine_purchase_priority(
+        current_stock,
+        required_stock,
+        inventory_confirmed,
+        outbound_qty_sum,
+        movement_net_qty,
+    );
+    let purchase_decision =
+        decide_purchase_v2(required_stock, current_stock.unwrap_or(0.0), unit_price);
 
     Some(LegacyShortageItem {
         part_name,
@@ -2509,6 +3538,9 @@ fn build_shortage_item(part: &serde_json::Value) -> Option<LegacyShortageItem> {
         inventory_confirmed,
         inventory_match_status,
         stock_status,
+        unit_price,
+        purchase_priority,
+        purchase_policy_note: purchase_decision.note,
         summary,
         document_request_hint,
     })
@@ -2569,9 +3601,263 @@ fn build_unverified_shortage_item(part: &serde_json::Value) -> Option<LegacyShor
         inventory_confirmed: false,
         inventory_match_status,
         stock_status: "재고 미확인".into(),
+        unit_price: part_unit_price(part),
+        purchase_priority: "확인 필요".into(),
+        purchase_policy_note: "재고 미확인: 재고 행 매칭 후 구매 여부 판단 필요".into(),
         summary,
         document_request_hint,
     })
+}
+
+fn collect_inventory_items(
+    snapshot: &serde_json::Value,
+    query: &LegacyInventoryQuery,
+    default_limit: usize,
+    max_limit: usize,
+) -> Result<(Vec<LegacyShortageItem>, usize), AppError> {
+    let parts = snapshot
+        .get("parts")
+        .and_then(|value| value.as_object())
+        .ok_or_else(|| AppError::bad_request("invalid snapshot format: parts missing".into()))?;
+    let needle = query.query.as_deref().map(normalize_lookup_text);
+    let status_filter = query.status.as_deref().unwrap_or("all").trim();
+    let match_status_filter = query.match_status.as_deref().map(str::trim);
+    let sort = query.sort.as_deref().unwrap_or("priority").trim();
+    let limit = query.limit.unwrap_or(default_limit).clamp(1, max_limit);
+
+    let mut items = parts
+        .values()
+        .filter_map(build_inventory_item)
+        .filter(|item| inventory_item_matches_query(item, needle.as_deref()))
+        .filter(|item| inventory_item_matches_status(item, status_filter))
+        .filter(|item| {
+            match_status_filter
+                .map(|status| item.inventory_match_status == status)
+                .unwrap_or(true)
+        })
+        .collect::<Vec<_>>();
+
+    sort_inventory_items(&mut items, sort);
+    let total_count = items.len();
+    items.truncate(limit);
+    Ok((items, total_count))
+}
+
+fn build_inventory_item(part: &serde_json::Value) -> Option<LegacyShortageItem> {
+    let part_name = part.get("part_name")?.as_str()?.trim().to_string();
+    let part_no = part
+        .get("part_no")
+        .and_then(|value| value.as_str())
+        .unwrap_or(&part_name)
+        .trim()
+        .to_string();
+    let current_stock = part_current_stock(part);
+    let required_stock = part_required_stock(part);
+    let available_stock = part_available_stock(part);
+    let shortage_gap = part_shortage_gap(part);
+    let shortage_quantity = part_shortage_quantity(part);
+    let projected_stock_balance = part_projected_stock_balance(part);
+    let movement_net_qty = part_movement_net_qty(part);
+    let inventory_confirmed = part_inventory_confirmed(part);
+    let inventory_match_status = part_inventory_match_status(part);
+    let inbound_qty_sum = part
+        .get("inbound_qty_sum")
+        .and_then(|value| value.as_f64())
+        .unwrap_or(0.0);
+    let outbound_qty_sum = part
+        .get("outbound_qty_sum")
+        .and_then(|value| value.as_f64())
+        .unwrap_or(0.0);
+    let outbound_count = part
+        .get("outbound_count")
+        .and_then(|value| value.as_u64())
+        .unwrap_or(0) as usize;
+    let stock_status = describe_inventory_state(current_stock, required_stock, inventory_confirmed);
+    let unit_price = part_unit_price(part);
+    let purchase_decision =
+        decide_purchase_v2(required_stock, current_stock.unwrap_or(0.0), unit_price);
+    let purchase_priority = determine_purchase_priority(
+        current_stock,
+        required_stock,
+        inventory_confirmed,
+        outbound_qty_sum,
+        movement_net_qty,
+    );
+
+    let summary = if !inventory_confirmed {
+        format!(
+            "{} ({})는 재고파일과 매칭되는 재고 행이 없어 현재고를 확정할 수 없습니다. 최근 3개년 출고합계 {:.0}개, 이동 순증감 {:.0}개입니다.",
+            part_name, part_no, outbound_qty_sum, movement_net_qty
+        )
+    } else if let (Some(current), Some(required), Some(shortage_quantity)) =
+        (current_stock, required_stock, shortage_quantity)
+    {
+        format!(
+            "{} ({})는 재고파일 기준 현재고 {:.0}개, 필수재고 {:.0}개라서 {:.0}개가 부족합니다. 최근 3개년 출고합계는 {:.0}개입니다.",
+            part_name, part_no, current, required, shortage_quantity, outbound_qty_sum
+        )
+    } else if let (Some(current), Some(required)) = (current_stock, required_stock) {
+        format!(
+            "{} ({})는 재고파일 기준 현재고 {:.0}개, 필수재고 {:.0}개로 재고가 확인되었습니다. 최근 3개년 출고합계는 {:.0}개입니다.",
+            part_name, part_no, current, required, outbound_qty_sum
+        )
+    } else {
+        format!(
+            "{} ({})는 재고파일 기준 현재고 {}, 최근 3개년 출고합계 {:.0}개, 이동 순증감 {:.0}개입니다.",
+            part_name,
+            part_no,
+            format_count(current_stock),
+            outbound_qty_sum,
+            movement_net_qty
+        )
+    };
+    let document_request_hint = format!("{part_name} ({part_no}) 품목으로 구매 품의 문서 작성해줘");
+
+    Some(LegacyShortageItem {
+        part_name,
+        part_no,
+        current_stock,
+        required_stock,
+        available_stock,
+        shortage_gap,
+        shortage_quantity,
+        projected_stock_balance,
+        movement_net_qty,
+        inbound_qty_sum,
+        outbound_qty_sum,
+        outbound_count,
+        inventory_confirmed,
+        inventory_match_status,
+        stock_status,
+        unit_price,
+        purchase_priority,
+        purchase_policy_note: purchase_decision.note,
+        summary,
+        document_request_hint,
+    })
+}
+
+fn determine_purchase_priority(
+    current_stock: Option<f64>,
+    required_stock: Option<f64>,
+    inventory_confirmed: bool,
+    outbound_qty_sum: f64,
+    movement_net_qty: f64,
+) -> String {
+    if !inventory_confirmed {
+        return "확인 필요".into();
+    }
+
+    let current_stock = current_stock.unwrap_or(0.0);
+    if current_stock <= 0.0 {
+        return "긴급".into();
+    }
+
+    if let Some(required_stock) = required_stock {
+        if current_stock < required_stock {
+            if outbound_qty_sum > 0.0 || movement_net_qty < 0.0 {
+                return "높음".into();
+            }
+            return "중간".into();
+        }
+    }
+
+    if movement_net_qty < 0.0 && outbound_qty_sum > 0.0 {
+        "모니터링".into()
+    } else {
+        "낮음".into()
+    }
+}
+
+fn inventory_item_matches_query(item: &LegacyShortageItem, needle: Option<&str>) -> bool {
+    if let Some(needle) = needle {
+        let hay = normalize_lookup_text(&format!("{} {}", item.part_name, item.part_no));
+        hay.contains(needle)
+    } else {
+        true
+    }
+}
+
+fn inventory_item_matches_status(item: &LegacyShortageItem, status: &str) -> bool {
+    match status {
+        "" | "all" => true,
+        "shortage" => item.stock_status == "재고 부족" || item.stock_status == "재고 없음",
+        "sufficient" => item.inventory_confirmed && item.stock_status == "재고 확인",
+        "out_of_stock" => item
+            .current_stock
+            .map(|stock| stock <= 0.0)
+            .unwrap_or(false),
+        "unverified" => !item.inventory_confirmed || item.stock_status == "재고 미확인",
+        "confirmed" => item.inventory_confirmed,
+        other => item.stock_status == other || item.inventory_match_status == other,
+    }
+}
+
+fn sort_inventory_items(items: &mut [LegacyShortageItem], sort: &str) {
+    items.sort_by(|a, b| match sort {
+        "consumption" | "outbound" => b
+            .outbound_qty_sum
+            .partial_cmp(&a.outbound_qty_sum)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| {
+                a.movement_net_qty
+                    .partial_cmp(&b.movement_net_qty)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+            .then_with(|| a.part_name.cmp(&b.part_name)),
+        "net_decrease" => a
+            .movement_net_qty
+            .partial_cmp(&b.movement_net_qty)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| {
+                b.outbound_qty_sum
+                    .partial_cmp(&a.outbound_qty_sum)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+            .then_with(|| a.part_name.cmp(&b.part_name)),
+        "shortage" => b
+            .shortage_quantity
+            .unwrap_or(0.0)
+            .partial_cmp(&a.shortage_quantity.unwrap_or(0.0))
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a.part_name.cmp(&b.part_name)),
+        "stock" => a
+            .current_stock
+            .unwrap_or(f64::MAX)
+            .partial_cmp(&b.current_stock.unwrap_or(f64::MAX))
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a.part_name.cmp(&b.part_name)),
+        "name" => a
+            .part_name
+            .cmp(&b.part_name)
+            .then_with(|| a.part_no.cmp(&b.part_no)),
+        _ => inventory_priority_rank(a)
+            .cmp(&inventory_priority_rank(b))
+            .then_with(|| {
+                b.shortage_quantity
+                    .unwrap_or(0.0)
+                    .partial_cmp(&a.shortage_quantity.unwrap_or(0.0))
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+            .then_with(|| {
+                b.outbound_qty_sum
+                    .partial_cmp(&a.outbound_qty_sum)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+            .then_with(|| a.part_name.cmp(&b.part_name)),
+    });
+}
+
+fn inventory_priority_rank(item: &LegacyShortageItem) -> u8 {
+    if item.stock_status == "재고 없음" {
+        0
+    } else if item.stock_status == "재고 부족" {
+        1
+    } else if !item.inventory_confirmed {
+        2
+    } else {
+        3
+    }
 }
 
 fn build_confirmed_shortage_markdown_table(items: &[LegacyShortageItem]) -> String {
@@ -2623,6 +3909,80 @@ fn build_unverified_shortage_markdown_table(items: &[LegacyShortageItem]) -> Opt
     Some(lines.join("\n"))
 }
 
+fn build_inventory_markdown_table(items: &[LegacyShortageItem]) -> String {
+    if items.is_empty() {
+        return "해당 조건에 맞는 품목이 없습니다.".into();
+    }
+
+    let mut lines = vec![
+        "| 품목명 | 품번 | 현재고 | 필수재고 | 최근 출고합계 | 이동 순증감 | 재고확인상태 | 단가 | 구매 우선순위 |".to_string(),
+        "| --- | --- | ---: | ---: | ---: | ---: | --- | ---: | --- |".to_string(),
+    ];
+
+    for item in items {
+        lines.push(format!(
+            "| {} | {} | {} | {} | {} | {} | {} | {} | {} |",
+            escape_markdown_table_cell(&item.part_name),
+            escape_markdown_table_cell(&item.part_no),
+            format_count(item.current_stock),
+            format_count(item.required_stock),
+            format_count(Some(item.outbound_qty_sum)),
+            format_count(Some(item.movement_net_qty)),
+            escape_markdown_table_cell(&item.stock_status),
+            format_price_plain(item.unit_price),
+            escape_markdown_table_cell(&item.purchase_priority),
+        ));
+    }
+
+    lines.join("\n")
+}
+
+fn build_inventory_report_csv(items: &[LegacyShortageItem]) -> String {
+    let mut lines = vec![[
+        "품목명",
+        "품번",
+        "현재고",
+        "필수재고",
+        "부족수량",
+        "재고확인상태",
+        "재고매칭상태",
+        "단가",
+        "구매 우선순위",
+        "구매판단",
+        "최근 입고합계",
+        "최근 출고합계",
+        "이동 순증감",
+        "출고 건수",
+    ]
+    .join(",")];
+
+    for item in items {
+        lines.push(
+            [
+                csv_cell(&item.part_name),
+                csv_cell(&item.part_no),
+                csv_cell(&format_count(item.current_stock)),
+                csv_cell(&format_count(item.required_stock)),
+                csv_cell(&format_count(item.shortage_quantity)),
+                csv_cell(&item.stock_status),
+                csv_cell(describe_inventory_match_status(
+                    &item.inventory_match_status,
+                )),
+                csv_cell(&format_price_plain(item.unit_price)),
+                csv_cell(&item.purchase_priority),
+                csv_cell(&item.purchase_policy_note),
+                csv_cell(&format_count(Some(item.inbound_qty_sum))),
+                csv_cell(&format_count(Some(item.outbound_qty_sum))),
+                csv_cell(&format_count(Some(item.movement_net_qty))),
+                csv_cell(&item.outbound_count.to_string()),
+            ]
+            .join(","),
+        );
+    }
+
+    format!("\u{feff}{}\n", lines.join("\n"))
+}
+
 fn escape_markdown_table_cell(value: &str) -> String {
     value.replace('|', "\\|").replace('\n', " ")
 }
@@ -2632,6 +3992,17 @@ fn format_count(value: Option<f64>) -> String {
         Some(value) => format!("{value:.0}"),
         None => "-".into(),
     }
+}
+
+fn format_price_plain(value: Option<f64>) -> String {
+    match value {
+        Some(value) => format!("{value:.0}"),
+        None => "-".into(),
+    }
+}
+
+fn csv_cell(value: &str) -> String {
+    format!("\"{}\"", value.replace('"', "\"\"").replace('\n', " "))
 }
 
 fn resolve_snapshot_part(
@@ -2756,6 +4127,29 @@ fn url_encode_query_value(value: &str) -> String {
         }
     }
     encoded
+}
+
+fn extract_markdown_pdf_download_path(download_path: &str) -> Option<String> {
+    let query = download_path.split_once('?').map(|(_, query)| query)?;
+    query.split('&').find_map(|pair| {
+        let (key, value) = pair.split_once('=')?;
+        (key == "path" && !value.is_empty()).then(|| value.to_string())
+    })
+}
+
+fn media_type_for_download(file_name: &str) -> &'static str {
+    match Path::new(file_name)
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "pdf" => "application/pdf",
+        "docx" => "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        "xlsx" => "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        _ => "application/octet-stream",
+    }
 }
 
 impl IntoResponse for AppError {
@@ -3047,6 +4441,30 @@ mod tests {
     }
 
     #[test]
+    fn build_inventory_item_includes_sufficient_stock_and_unit_price() {
+        let part = serde_json::json!({
+            "part_name": "ENOUGH PART",
+            "part_no": "EP-001",
+            "current_stock_before": 12.0,
+            "required_stock": 5.0,
+            "movement_net_qty": -2.0,
+            "inventory_confirmed": true,
+            "inventory_match_status": "matched_all",
+            "outbound_qty_sum": 3.0,
+            "outbound_count": 1,
+            "document_context": {
+                "unit_price": 250000.0
+            }
+        });
+
+        let item = build_inventory_item(&part).expect("expected inventory item");
+        assert_eq!(item.stock_status, "재고 확인");
+        assert_eq!(item.unit_price, Some(250000.0));
+        assert_eq!(item.purchase_priority, "모니터링");
+        assert!(inventory_item_matches_status(&item, "sufficient"));
+    }
+
+    #[test]
     fn build_confirmed_shortage_markdown_table_renders_markdown_rows() {
         let table = build_confirmed_shortage_markdown_table(&[LegacyShortageItem {
             part_name: "TEST FILTER".into(),
@@ -3064,6 +4482,9 @@ mod tests {
             inventory_confirmed: true,
             inventory_match_status: "matched_all".into(),
             stock_status: "재고 부족".into(),
+            unit_price: Some(125000.0),
+            purchase_priority: "높음".into(),
+            purchase_policy_note: "구매 진행".into(),
             summary: "현재고 1개, 필수재고 11개라서 10개가 부족한 상태입니다.".into(),
             document_request_hint: "TEST FILTER 문서 작성".into(),
         }]);

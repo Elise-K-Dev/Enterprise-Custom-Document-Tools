@@ -15,16 +15,15 @@ RUN groupadd --gid "${APP_GID}" app \
 
 COPY pyproject.toml pyproject.toml
 COPY app app
-COPY legacy-md-indexer-main legacy-md-indexer-main
 RUN pip install --no-cache-dir .
 RUN mkdir -p /app/output \
   && chown -R app:app /app
 
-ENV PARSER_SERVICE_HOST=0.0.0.0
-ENV PARSER_SERVICE_PORT=8002
-ENV PARSER_PDF_OUTPUT_DIR=/app/output/pdf
-ENV PARSER_PDF_PUBLIC_BASE_URL=http://127.0.0.1:8002
+ENV MARKDOWN_PDF_SERVICE_HOST=0.0.0.0
+ENV MARKDOWN_PDF_SERVICE_PORT=8003
+ENV MARKDOWN_PDF_OUTPUT_DIR=/app/output
 ENV CHROMIUM_EXECUTABLE_PATH=/usr/bin/chromium
-EXPOSE 8002
+EXPOSE 8003
+
 USER app
-CMD ["sh", "-c", "uvicorn app.main:app --host ${PARSER_SERVICE_HOST} --port ${PARSER_SERVICE_PORT}"]
+CMD ["sh", "-c", "uvicorn app.main:app --host ${MARKDOWN_PDF_SERVICE_HOST} --port ${MARKDOWN_PDF_SERVICE_PORT}"]

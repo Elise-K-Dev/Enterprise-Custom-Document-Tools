@@ -4,15 +4,23 @@ import json
 import os
 import re
 import hashlib
+import secrets
 import sys
+import time
 import urllib.error
 import urllib.request
+import html
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, List
+from typing import Any, List, Literal
+from urllib.parse import quote
 
 import requests
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
+from markdown_it import MarkdownIt
+from playwright.async_api import async_playwright
 from pydantic import BaseModel, Field
 from rank_bm25 import BM25Okapi
 from kiwipiepy import Kiwi
@@ -76,10 +84,74 @@ if str(LEGACY_MD_INDEXER_DIR) not in sys.path:
     sys.path.insert(0, str(LEGACY_MD_INDEXER_DIR))
 _KIWI: Kiwi | None = None
 OPEN_WEBUI_EMAIL_RANK_MAP = {
+    "elise@local.dev": "hi_rank",
     "admin@gmail.com": "hi_rank",
     "user@gmail.com": "low_rank",
 }
 OPEN_WEBUI_USER_EMAIL_HEADER = "x-openwebui-user-email"
+OPEN_WEBUI_USER_ID_HEADER = "x-openwebui-user-id"
+OPEN_WEBUI_USER_NAME_HEADER = "x-openwebui-user-name"
+OPEN_WEBUI_USER_GROUPS_HEADER = "x-openwebui-user-groups"
+OPEN_WEBUI_USER_RANK_HEADER = "x-openwebui-user-rank"
+INTERNAL_TOKEN_HEADER = "x-port-project-internal-token"
+PDF_OUTPUT_DIR = Path(os.getenv("PARSER_PDF_OUTPUT_DIR", "/app/output/pdf"))
+PDF_PUBLIC_BASE_URL = os.getenv("PARSER_PDF_PUBLIC_BASE_URL", "http://127.0.0.1:8002").rstrip("/")
+CHROMIUM_EXECUTABLE_PATH = os.getenv("CHROMIUM_EXECUTABLE_PATH", "/usr/bin/chromium")
+DOWNLOAD_TOKEN_TTL_SECONDS = int(os.getenv("PORT_PROJECT_DOWNLOAD_TOKEN_TTL_SECONDS", "3600"))
+_DOWNLOAD_GRANTS: dict[str, dict[str, Any]] = {}
+
+REPORT_CSS = """
+@page { size: A4; margin: 18mm 16mm; }
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  color: #1f2933;
+  font-family: "Noto Sans CJK KR", "Noto Sans KR", "Noto Sans", Arial, sans-serif;
+  font-size: 11pt;
+  line-height: 1.58;
+}
+h1 {
+  margin: 0 0 12px;
+  padding-bottom: 8px;
+  border-bottom: 2px solid #1f2933;
+  color: #111827;
+  font-size: 22pt;
+  line-height: 1.25;
+}
+h2 { margin: 22px 0 8px; color: #111827; font-size: 15pt; }
+h3 { margin: 16px 0 6px; color: #25313f; font-size: 12.5pt; }
+p { margin: 6px 0; }
+ul, ol { margin: 6px 0 10px 22px; padding: 0; }
+li { margin: 3px 0; }
+table {
+  width: 100%;
+  margin: 10px 0 14px;
+  border-collapse: collapse;
+  table-layout: fixed;
+  font-size: 9.5pt;
+}
+th, td {
+  padding: 6px 7px;
+  border: 1px solid #cbd5e1;
+  vertical-align: top;
+  word-break: keep-all;
+  overflow-wrap: anywhere;
+}
+th { background: #eef2f7; color: #111827; font-weight: 700; }
+blockquote {
+  margin: 10px 0;
+  padding: 8px 12px;
+  border-left: 4px solid #94a3b8;
+  background: #f8fafc;
+}
+pre {
+  padding: 10px;
+  border: 1px solid #d7dee8;
+  background: #f8fafc;
+  white-space: pre-wrap;
+}
+.meta { margin: 0 0 16px; color: #52606d; font-size: 9.5pt; }
+"""
 
 
 class ParseRequest(BaseModel):
@@ -116,14 +188,9 @@ class FillFieldsRequest(BaseModel):
 
 class FillFieldsResponse(BaseModel):
     status: str
-    legacy_prompt: str
-    fill_prompt_ko: str
-    final_prompt: str
-    request_payload: dict[str, Any]
-    model: str
-    api_url: str
+    tool: str
+    message: str
     suggested_fields: dict[str, str]
-    raw_response: str
     assistant_summary: str
 
 
@@ -157,6 +224,23 @@ class ResolvedSearchIdentity(BaseModel):
     username: str
     rank: str
     auth_source: str
+
+
+class RenderMarkdownPdfRequest(BaseModel):
+    title: str = Field(..., description="보고서 제목", min_length=1, max_length=200)
+    markdown: str = Field(..., description="PDF로 변환할 Markdown 본문", min_length=1)
+    file_name: str | None = Field(default=None, description="생성할 PDF 파일명")
+    page_size: Literal["A4", "Letter"] = Field(default="A4", description="PDF 용지 크기")
+    orientation: Literal["portrait", "landscape"] = Field(default="portrait", description="PDF 방향")
+
+
+class RenderMarkdownPdfResponse(BaseModel):
+    output_path: str
+    download_path: str
+    download_url: str
+    file_name: str
+    title: str
+    assistant_summary: str
 
 
 @app.get("/openapi.json")
@@ -294,16 +378,12 @@ def openapi_spec() -> dict[str, Any]:
                                         "type": "object",
                                         "properties": {
                                             "status": {"type": "string"},
-                                            "legacy_prompt": {"type": "string"},
-                                            "fill_prompt_ko": {"type": "string"},
-                                            "final_prompt": {"type": "string"},
-                                            "model": {"type": "string"},
-                                            "api_url": {"type": "string"},
+                                            "tool": {"type": "string"},
+                                            "message": {"type": "string"},
                                             "suggested_fields": {
                                                 "type": "object",
                                                 "additionalProperties": {"type": "string"},
                                             },
-                                            "raw_response": {"type": "string"},
                                             "assistant_summary": {"type": "string"},
                                         },
                                     }
@@ -364,8 +444,99 @@ def openapi_spec() -> dict[str, Any]:
                     },
                 }
             },
+            "/render/markdown-pdf": {
+                "post": {
+                    "operationId": "render_markdown_pdf",
+                    "summary": "Markdown 보고서를 PDF 파일로 생성",
+                    "description": "사용자가 수리 완료 보고서, 업무 보고, 회의록, 분석 결과, 요약문을 문서 파일로 요청하면 Markdown 본문을 이 도구에 전달해 PDF 다운로드 링크를 생성합니다. 필요한 근거는 search_documents_by_rank로 먼저 찾고, 이 도구는 최종 Markdown을 PDF로 렌더링합니다.",
+                    "requestBody": {
+                        "required": True,
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "type": "object",
+                                    "required": ["title", "markdown"],
+                                    "properties": {
+                                        "title": {"type": "string", "example": "엘리베이터 주요 정비 및 개선 조치 결과 보고"},
+                                        "markdown": {"type": "string", "description": "PDF로 변환할 Markdown 보고서 본문"},
+                                        "file_name": {"type": ["string", "null"], "example": "elevator_repair_report.pdf"},
+                                        "page_size": {"type": "string", "default": "A4", "enum": ["A4", "Letter"]},
+                                        "orientation": {"type": "string", "default": "portrait", "enum": ["portrait", "landscape"]},
+                                    },
+                                }
+                            }
+                        },
+                    },
+                    "responses": {"200": {"description": "PDF rendered"}},
+                }
+            },
         },
     }
+
+
+def configured_internal_token() -> str:
+    token = os.getenv("PORT_PROJECT_INTERNAL_TOKEN", "").strip()
+    if not token:
+        raise HTTPException(status_code=500, detail="PORT_PROJECT_INTERNAL_TOKEN is not configured")
+    return token
+
+
+def require_internal_request(raw_request: Request) -> None:
+    expected = configured_internal_token()
+    supplied = (raw_request.headers.get(INTERNAL_TOKEN_HEADER) or "").strip()
+    if not secrets.compare_digest(supplied, expected):
+        raise HTTPException(status_code=403, detail="invalid internal tool token")
+
+
+def require_registered_tool_user(raw_request: Request) -> dict[str, str]:
+    require_internal_request(raw_request)
+    email = (raw_request.headers.get(OPEN_WEBUI_USER_EMAIL_HEADER) or "").strip().lower()
+    user_id = (raw_request.headers.get(OPEN_WEBUI_USER_ID_HEADER) or "").strip()
+    name = (raw_request.headers.get(OPEN_WEBUI_USER_NAME_HEADER) or "").strip()
+    if not email or not user_id:
+        raise HTTPException(status_code=401, detail="registered Open WebUI account is required")
+    return {"email": email, "user_id": user_id, "name": name or email}
+
+
+def purge_expired_download_grants(now: float | None = None) -> None:
+    current = now or time.time()
+    expired = [
+        token
+        for token, grant in _DOWNLOAD_GRANTS.items()
+        if float(grant.get("expires_at", 0)) <= current
+    ]
+    for token in expired:
+        _DOWNLOAD_GRANTS.pop(token, None)
+
+
+def issue_download_token(path: str, user: dict[str, str]) -> str:
+    purge_expired_download_grants()
+    token = secrets.token_urlsafe(32)
+    _DOWNLOAD_GRANTS[token] = {
+        "path": path,
+        "user_id": user["user_id"],
+        "email": user["email"],
+        "expires_at": time.time() + DOWNLOAD_TOKEN_TTL_SECONDS,
+    }
+    return token
+
+
+def validate_download_token(path: str, token: str | None) -> None:
+    if not token:
+        raise HTTPException(status_code=401, detail="download token is required")
+    purge_expired_download_grants()
+    grant = _DOWNLOAD_GRANTS.get(token)
+    if not grant or grant.get("path") != path:
+        raise HTTPException(status_code=403, detail="invalid download token")
+
+
+def format_suggested_fields_message(suggested_fields: dict[str, str]) -> str:
+    if not suggested_fields:
+        return "문서 필드 초안을 생성하지 못했습니다. 입력 조건이나 근거 문서를 다시 확인해 주세요."
+    lines = ["문서 필드 초안을 생성했습니다."]
+    for field, value in suggested_fields.items():
+        lines.append(f"- {field}: {value}")
+    return "\n".join(lines)
 
 
 @app.get("/health")
@@ -374,15 +545,70 @@ def health() -> dict[str, str]:
 
 
 @app.post("/parser/to-md", response_model=ParseResponse)
-def parse_to_md(request: ParseRequest) -> ParseResponse:
+def parse_to_md(request: ParseRequest, raw_request: Request) -> ParseResponse:
+    require_registered_tool_user(raw_request)
     normalized = normalize_text(request.content)
     sections = split_sections(normalized)
     markdown = to_markdown(sections)
     return ParseResponse(markdown=markdown, sections=sections)
 
 
+@app.post("/render/markdown-pdf", response_model=RenderMarkdownPdfResponse)
+async def render_markdown_pdf(request: RenderMarkdownPdfRequest, raw_request: Request) -> RenderMarkdownPdfResponse:
+    user = require_registered_tool_user(raw_request)
+    PDF_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    file_name = sanitize_pdf_filename(request.file_name or request.title)
+    relative_path = Path("reports") / file_name
+    output_path = PDF_OUTPUT_DIR / relative_path
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    html_content = build_report_html(request.title, request.markdown)
+    await render_pdf_with_chromium(
+        html_content,
+        output_path,
+        page_size=request.page_size,
+        landscape=request.orientation == "landscape",
+    )
+
+    token = issue_download_token(relative_path.as_posix(), user)
+    download_path = f"/render/download?path={quote(relative_path.as_posix())}&token={quote(token)}"
+    download_url = f"{PDF_PUBLIC_BASE_URL}{download_path}"
+    return RenderMarkdownPdfResponse(
+        output_path=relative_path.as_posix(),
+        download_path=download_path,
+        download_url=download_url,
+        file_name=file_name,
+        title=request.title,
+        assistant_summary=f"{request.title} PDF 파일을 생성했습니다. 다운로드 링크는 {download_url} 입니다.",
+    )
+
+
+@app.get("/render/download")
+def download_rendered_pdf(
+    path: str = Query(..., description="PDF_OUTPUT_DIR 기준 상대 경로"),
+    token: str | None = Query(default=None, description="등록 계정에 발급된 다운로드 토큰"),
+) -> FileResponse:
+    validate_download_token(path, token)
+    requested = PDF_OUTPUT_DIR / path
+    try:
+        canonical_output = PDF_OUTPUT_DIR.resolve()
+        canonical_file = requested.resolve()
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="file not found") from exc
+
+    if not canonical_file.is_file() or not canonical_file.is_relative_to(canonical_output):
+        raise HTTPException(status_code=404, detail="file not found")
+
+    return FileResponse(
+        canonical_file,
+        media_type="application/pdf",
+        filename=canonical_file.name,
+    )
+
+
 @app.post("/document/fill-fields", response_model=FillFieldsResponse)
-def fill_document_fields(request: FillFieldsRequest) -> FillFieldsResponse:
+def fill_document_fields(request: FillFieldsRequest, raw_request: Request) -> FillFieldsResponse:
+    require_registered_tool_user(raw_request)
     legacy_prompt = build_legacy_prompt(
         query=request.query,
         context=request.context,
@@ -418,20 +644,16 @@ def fill_document_fields(request: FillFieldsRequest) -> FillFieldsResponse:
     assistant_summary = build_assistant_summary(suggested_fields)
     return FillFieldsResponse(
         status="ok",
-        legacy_prompt=legacy_prompt,
-        fill_prompt_ko=fill_prompt_ko,
-        final_prompt=final_prompt,
-        request_payload=payload,
-        model=model,
-        api_url=api_url,
+        tool="문서 필드 초안 생성 도구",
+        message=format_suggested_fields_message(suggested_fields),
         suggested_fields=suggested_fields,
-        raw_response=message_content,
         assistant_summary=assistant_summary,
     )
 
 
 @app.post("/search/query", response_model=SearchDocumentResponse)
 def search_documents(payload: SearchDocumentRequest, raw_request: Request) -> SearchDocumentResponse:
+    require_registered_tool_user(raw_request)
     identity = resolve_search_identity(payload, raw_request)
     if identity.rank == "low_rank" and is_sensitive_low_rank_query(payload.query):
         return SearchDocumentResponse(
@@ -578,6 +800,69 @@ def looks_like_list(section: str) -> bool:
     if len(lines) < 2:
         return False
     return sum(1 for line in lines if re.match(r"^[-*•]|\d+\.", line)) >= max(2, len(lines) // 2)
+
+
+def build_report_html(title: str, markdown: str) -> str:
+    renderer = MarkdownIt("commonmark", {"html": False}).enable("table").enable("strikethrough")
+    body = renderer.render(markdown)
+    generated_at = datetime.now(timezone.utc).astimezone().strftime("%Y-%m-%d %H:%M")
+    return f"""<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <title>{html.escape(title)}</title>
+  <style>{REPORT_CSS}</style>
+</head>
+<body>
+  <main>
+    <h1>{html.escape(title)}</h1>
+    <p class="meta">생성 시각: {html.escape(generated_at)}</p>
+    {body}
+  </main>
+</body>
+</html>"""
+
+
+async def render_pdf_with_chromium(
+    html_content: str,
+    output_path: Path,
+    page_size: str,
+    landscape: bool,
+) -> None:
+    try:
+        async with async_playwright() as playwright:
+            chromium_args = ["--disable-dev-shm-usage"]
+            if os.getenv("CHROMIUM_DISABLE_SANDBOX", "false").lower() == "true":
+                chromium_args.append("--no-sandbox")
+            browser = await playwright.chromium.launch(
+                headless=True,
+                executable_path=CHROMIUM_EXECUTABLE_PATH,
+                args=chromium_args,
+            )
+            page = await browser.new_page()
+            await page.set_content(html_content, wait_until="networkidle")
+            await page.pdf(
+                path=str(output_path),
+                format=page_size,
+                landscape=landscape,
+                print_background=True,
+                margin={"top": "0", "right": "0", "bottom": "0", "left": "0"},
+            )
+            await browser.close()
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"failed to render PDF: {exc}") from exc
+
+
+def sanitize_pdf_filename(raw: str) -> str:
+    base = raw.rsplit("/", 1)[-1].rsplit("\\", 1)[-1].strip()
+    if base.lower().endswith(".pdf"):
+        base = base[:-4]
+    base = re.sub(r"[^0-9A-Za-z가-힣._ -]+", "_", base)
+    base = re.sub(r"\s+", "_", base).strip("._- ")
+    if not base:
+        base = "report"
+    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    return f"{base}_{stamp}.pdf"
 
 
 def build_legacy_prompt(query: str, context: str, chat_history: list[ChatTurn]) -> str:
@@ -733,20 +1018,53 @@ def load_legacy_users() -> dict[str, Any]:
         return {}
 
 
-def resolve_openwebui_identity(user_email: str | None) -> ResolvedSearchIdentity | None:
+def normalize_document_rank(rank: str | None) -> str | None:
+    normalized_rank = (rank or "").strip().lower()
+    if normalized_rank in {"hi_rank", "low_rank"}:
+        return normalized_rank
+    return None
+
+
+def parse_openwebui_groups(raw_value: str | None) -> list[str]:
+    if not raw_value:
+        return []
+    return [group.strip() for group in raw_value.split(",") if group.strip()]
+
+
+def infer_rank_from_openwebui_groups(group_names: list[str]) -> str | None:
+    normalized_groups = [group.lower() for group in group_names]
+    if any("개발자 그룹" in group or "회사 그룹 - 팀장" in group for group in normalized_groups):
+        return "hi_rank"
+    if any("회사 그룹 - 사원" in group for group in normalized_groups):
+        return "low_rank"
+    return None
+
+
+def resolve_openwebui_identity(
+    user_email: str | None,
+    explicit_rank: str | None = None,
+    group_names: list[str] | None = None,
+) -> ResolvedSearchIdentity | None:
     normalized_email = (user_email or "").strip().lower()
-    if not normalized_email:
+    resolved_rank = normalize_document_rank(explicit_rank) or infer_rank_from_openwebui_groups(
+        group_names or []
+    )
+
+    if not normalized_email and not resolved_rank:
         return None
 
-    users = load_legacy_users()
-    rank = (users.get(normalized_email) or {}).get("rank") or OPEN_WEBUI_EMAIL_RANK_MAP.get(normalized_email)
-    if not rank:
-        return None
+    if not resolved_rank:
+        users = load_legacy_users()
+        resolved_rank = (users.get(normalized_email) or {}).get("rank") or OPEN_WEBUI_EMAIL_RANK_MAP.get(
+            normalized_email
+        )
+        if not resolved_rank:
+            return None
 
     return ResolvedSearchIdentity(
-        username=normalized_email,
-        rank=rank,
-        auth_source="openwebui_email",
+        username=normalized_email or "openwebui_forwarded",
+        rank=resolved_rank,
+        auth_source="openwebui_userinfo" if explicit_rank or group_names else "openwebui_email",
     )
 
 
@@ -781,17 +1099,23 @@ def resolve_legacy_identity(username: str | None, password: str | None) -> Resol
 
 def resolve_forwarded_openwebui_identity(raw_request: Request) -> ResolvedSearchIdentity | None:
     forwarded_email = raw_request.headers.get(OPEN_WEBUI_USER_EMAIL_HEADER)
-    return resolve_openwebui_identity(forwarded_email)
+    forwarded_rank = raw_request.headers.get(OPEN_WEBUI_USER_RANK_HEADER)
+    forwarded_groups = parse_openwebui_groups(raw_request.headers.get(OPEN_WEBUI_USER_GROUPS_HEADER))
+    return resolve_openwebui_identity(
+        forwarded_email,
+        explicit_rank=forwarded_rank,
+        group_names=forwarded_groups,
+    )
 
 
 def resolve_search_identity(payload: SearchDocumentRequest, raw_request: Request) -> ResolvedSearchIdentity:
-    openwebui_identity = resolve_openwebui_identity(payload.user_email)
-    if openwebui_identity is not None:
-        return openwebui_identity
-
     forwarded_identity = resolve_forwarded_openwebui_identity(raw_request)
     if forwarded_identity is not None:
         return forwarded_identity
+
+    openwebui_identity = resolve_openwebui_identity(payload.user_email)
+    if openwebui_identity is not None:
+        return openwebui_identity
 
     legacy_identity = resolve_legacy_identity(payload.username, payload.password)
     if legacy_identity is not None:

@@ -1440,6 +1440,9 @@ fn build_part_document_context(snapshot: &Snapshot, part: &PartBlock) -> Documen
         }
     }
 
+    let inbound_doc_fields =
+        resolve_inbound_document_fields(snapshot, part, &k_vendor, &k_unit, &k_unit_price);
+
     let events = collect_replacement_events(snapshot, part);
     let has_replacement_history = !events.is_empty();
     if let Some(latest) = events.last() {
@@ -1453,14 +1456,15 @@ fn build_part_document_context(snapshot: &Snapshot, part: &PartBlock) -> Documen
         }
     }
 
-    if let Some(in_idx) = part.inbound_row_idx.last() {
-        if let Some(in_row) = snapshot.raw.inbound_rows.get(*in_idx) {
-            let v = pick_first_col(&in_row.header_norm_index, &in_row.cells, &k_vendor);
-            if v != "기록없음" {
-                vendor_name = v;
-            }
-            unit = pick_first_col(&in_row.header_norm_index, &in_row.cells, &k_unit);
-            unit_price = pick_first_col(&in_row.header_norm_index, &in_row.cells, &k_unit_price);
+    if let Some(fields) = inbound_doc_fields {
+        if !is_missing_doc_value(&fields.vendor_name) {
+            vendor_name = fields.vendor_name;
+        }
+        if !is_missing_doc_value(&fields.unit) {
+            unit = fields.unit;
+        }
+        if !is_missing_doc_value(&fields.unit_price) {
+            unit_price = fields.unit_price;
         }
     }
 
@@ -1509,6 +1513,139 @@ fn build_part_document_context(snapshot: &Snapshot, part: &PartBlock) -> Documen
         unit_price: parse_numeric_text(&unit_price),
         has_replacement_history,
     }
+}
+
+#[derive(Debug, Clone)]
+struct InboundDocumentFields {
+    vendor_name: String,
+    unit: String,
+    unit_price: String,
+}
+
+fn resolve_inbound_document_fields(
+    snapshot: &Snapshot,
+    part: &PartBlock,
+    k_vendor: &[String],
+    k_unit: &[String],
+    k_unit_price: &[String],
+) -> Option<InboundDocumentFields> {
+    if let Some(in_idx) = part.inbound_row_idx.last() {
+        if let Some(row) = snapshot.raw.inbound_rows.get(*in_idx) {
+            return Some(inbound_document_fields(row, k_vendor, k_unit, k_unit_price));
+        }
+    }
+
+    best_fallback_inbound_row(snapshot, part)
+        .map(|row| inbound_document_fields(row, k_vendor, k_unit, k_unit_price))
+}
+
+fn inbound_document_fields(
+    row: &RowRecord,
+    k_vendor: &[String],
+    k_unit: &[String],
+    k_unit_price: &[String],
+) -> InboundDocumentFields {
+    InboundDocumentFields {
+        vendor_name: pick_first_col(&row.header_norm_index, &row.cells, k_vendor),
+        unit: pick_first_col(&row.header_norm_index, &row.cells, k_unit),
+        unit_price: pick_first_col(&row.header_norm_index, &row.cells, k_unit_price),
+    }
+}
+
+fn best_fallback_inbound_row<'a>(
+    snapshot: &'a Snapshot,
+    part: &PartBlock,
+) -> Option<&'a RowRecord> {
+    let part_no = part.part_no.as_deref().unwrap_or("");
+    let part_name = part.part_name.as_str();
+    let mut best: Option<(i32, &RowRecord)> = None;
+
+    for row in &snapshot.raw.inbound_rows {
+        if is_missing_doc_value(row.part_no.as_deref().unwrap_or(""))
+            && is_missing_doc_value(row.part_name.as_deref().unwrap_or(""))
+        {
+            continue;
+        }
+
+        let score = inbound_fallback_score(part_no, part_name, row);
+        if score <= 0 {
+            continue;
+        }
+        if best
+            .map(|(best_score, _)| score > best_score)
+            .unwrap_or(true)
+        {
+            best = Some((score, row));
+        }
+    }
+
+    best.and_then(|(score, row)| if score >= 80 { Some(row) } else { None })
+}
+
+fn inbound_fallback_score(part_no: &str, part_name: &str, row: &RowRecord) -> i32 {
+    let row_no = row.part_no.as_deref().unwrap_or("");
+    let row_name = row.part_name.as_deref().unwrap_or("");
+    let part_no_norm = normalize_match_key(part_no);
+    let row_no_norm = normalize_match_key(row_no);
+    let mut score = 0;
+
+    if !part_no_norm.is_empty() && !row_no_norm.is_empty() {
+        if part_no_norm == row_no_norm {
+            score += 140;
+        } else if part_no_norm.len().min(row_no_norm.len()) >= 6
+            && (part_no_norm.contains(&row_no_norm) || row_no_norm.contains(&part_no_norm))
+        {
+            score += 110;
+        }
+    }
+
+    let shared_no_tokens = shared_identifier_tokens(part_no, row_no);
+    score += 45 * shared_no_tokens.len() as i32;
+
+    if score == 0 {
+        return 0;
+    }
+
+    let part_name_key = normalize_match_key(part_name);
+    let row_name_key = normalize_match_key(row_name);
+    if !part_name_key.is_empty() && !row_name_key.is_empty() {
+        let name_score =
+            jaccard_bigram_score_sets(&bigram_set(&part_name_key), &bigram_set(&row_name_key));
+        if name_score >= 0.70 {
+            score += 30;
+        } else if name_score >= 0.45 {
+            score += 15;
+        }
+    }
+
+    score
+}
+
+fn shared_identifier_tokens(a: &str, b: &str) -> HashSet<String> {
+    let a_tokens = identifier_tokens(a);
+    let b_tokens = identifier_tokens(b);
+    a_tokens.intersection(&b_tokens).cloned().collect()
+}
+
+fn identifier_tokens(s: &str) -> HashSet<String> {
+    let mut out = HashSet::new();
+    let mut current = String::new();
+    for ch in s.chars() {
+        if ch.is_ascii_alphanumeric() {
+            current.push(ch.to_ascii_lowercase());
+        } else {
+            push_identifier_token(&mut out, &mut current);
+        }
+    }
+    push_identifier_token(&mut out, &mut current);
+    out
+}
+
+fn push_identifier_token(out: &mut HashSet<String>, current: &mut String) {
+    if current.len() >= 4 && current != "part" && current != "filter" {
+        out.insert(current.clone());
+    }
+    current.clear();
 }
 
 fn write_snapshot_json(out_json: &Path, snapshot: &Snapshot) -> Result<()> {
@@ -1874,16 +2011,17 @@ fn build_document_rows(
             }
         }
 
-        if let Some(in_idx) = part.inbound_row_idx.last() {
-            if let Some(in_row) = snapshot.raw.inbound_rows.get(*in_idx) {
-                let v = pick_first_col(&in_row.header_norm_index, &in_row.cells, &k_vendor);
-                if v != "기록없음" {
-                    vendor_name = v;
-                }
-
-                unit = pick_first_col(&in_row.header_norm_index, &in_row.cells, &k_unit);
-                unit_price =
-                    pick_first_col(&in_row.header_norm_index, &in_row.cells, &k_unit_price);
+        if let Some(fields) =
+            resolve_inbound_document_fields(snapshot, part, &k_vendor, &k_unit, &k_unit_price)
+        {
+            if !is_missing_doc_value(&fields.vendor_name) {
+                vendor_name = fields.vendor_name;
+            }
+            if !is_missing_doc_value(&fields.unit) {
+                unit = fields.unit;
+            }
+            if !is_missing_doc_value(&fields.unit_price) {
+                unit_price = fields.unit_price;
             }
         }
 
@@ -2424,6 +2562,34 @@ fn replace_tokens_in_text_docx(text: &str, values: &BTreeMap<&'static str, Strin
         }
     }
     out.push_str(&text[cursor..]);
+    replace_legacy_double_paren_tokens_docx(&out, values)
+}
+
+fn replace_legacy_double_paren_tokens_docx(
+    text: &str,
+    values: &BTreeMap<&'static str, String>,
+) -> String {
+    let mut out = String::with_capacity(text.len() + 64);
+    let mut cursor = 0usize;
+    while let Some(start_rel) = text[cursor..].find("((") {
+        let start = cursor + start_rel;
+        out.push_str(&text[cursor..start]);
+        let body_start = start + 2;
+        if let Some(end_rel) = text[body_start..].find("))") {
+            let body_end = body_start + end_rel;
+            let key = text[body_start..body_end].trim();
+            let value = values
+                .get(key)
+                .cloned()
+                .unwrap_or_else(|| text[start..body_end + 2].to_string());
+            out.push_str(&value);
+            cursor = body_end + 2;
+        } else {
+            out.push_str(&text[start..]);
+            return out;
+        }
+    }
+    out.push_str(&text[cursor..]);
     out
 }
 
@@ -2533,6 +2699,7 @@ fn build_docx_values(row: &DocumentRow, serial: usize) -> BTreeMap<&'static str,
     } else {
         row.vendor_name.clone()
     };
+    let new_vendor = "(직접입력)".to_string();
     let manufacturer = if is_missing_doc_value(&row.manufacturer_name) {
         "(직접입력)".to_string()
     } else {
@@ -2575,8 +2742,10 @@ fn build_docx_values(row: &DocumentRow, serial: usize) -> BTreeMap<&'static str,
     m.insert("장비명", target_where.clone());
     m.insert("현재고", format!("{:.0}", row.current_stock_before));
     m.insert("재고", format!("{:.0}", row.current_stock_before));
-    m.insert("구매량", purchase_qty);
+    m.insert("구매량", purchase_qty.clone());
     m.insert("구매수량", format!("{:.0}", purchase_qty_num));
+    m.insert("구매 직접입력", purchase_qty.clone());
+    m.insert("구매직접입력", purchase_qty.clone());
     m.insert("교체수량1", row.replacement_qtys[0].clone());
     m.insert("교체수량2", row.replacement_qtys[1].clone());
     m.insert("교체수량3", row.replacement_qtys[2].clone());
@@ -2597,19 +2766,17 @@ fn build_docx_values(row: &DocumentRow, serial: usize) -> BTreeMap<&'static str,
     m.insert("호기5", row.replacement_hosts[4].clone());
     m.insert("호기6", row.replacement_hosts[5].clone());
     m.insert("부품-장착-수량", row.issued_qty.clone());
+    m.insert("장착수량 직접입력", row.issued_qty.clone());
     m.insert("단위", unit);
     m.insert("단가", unit_price_text.clone());
-    m.insert("사유", "(직접입력)".to_string());
+    m.insert("사유", purchase_reason.clone());
     m.insert("구매사유", purchase_reason.clone());
     m.insert("비고", purchase_reason.clone());
     m.insert("구-거래처", vendor.clone());
     m.insert("구거래처", vendor.clone());
     m.insert("부품제조사", manufacturer);
-    let supplier = m
-        .get("구-거래처")
-        .cloned()
-        .unwrap_or_else(|| "(직접입력)".to_string());
-    m.insert("공급업체", supplier);
+    m.insert("공급업체", new_vendor.clone());
+    m.insert("신규 거래업체", new_vendor.clone());
 
     m.insert("관련사진1", "(직접기입)".to_string());
     m.insert("관련사진2", "(직접기입)".to_string());
@@ -2621,6 +2788,11 @@ fn build_docx_values(row: &DocumentRow, serial: usize) -> BTreeMap<&'static str,
     m.insert("ctc-승인여부", "(직접입력)".to_string());
     m.insert("moz-승인시간", "(직접입력)".to_string());
     m.insert("moz-승인여부", "(직접입력)".to_string());
+    m.insert("담당자 직접입력", "(직접입력)".to_string());
+    m.insert("번호 직접입력", "(직접입력)".to_string());
+    m.insert("업체명 직접입력", new_vendor);
+    m.insert("신규 거래업체 담당자", "(직접입력)".to_string());
+    m.insert("신규 거래업체 담당자 번호", "(직접입력)".to_string());
     m.insert("합의여부", "(직접입력)".to_string());
     m.insert("성함1", "(직접입력)".to_string());
     m.insert("성함2", "(직접입력)".to_string());
@@ -2628,17 +2800,25 @@ fn build_docx_values(row: &DocumentRow, serial: usize) -> BTreeMap<&'static str,
     m.insert("직책2", "(직접입력)".to_string());
     m.insert("발신부서", "(직접입력)".to_string());
     m.insert("현황-및-문제점-1)", purchase_reason.clone());
+    m.insert("구매수량 선정 사유", purchase_reason.clone());
     m.insert("현황-및-문제점-2", "(직접입력)".to_string());
     m.insert("이후-진행사항", "(직접입력)".to_string());
     m.insert("납기기간", "(직접입력)".to_string());
+    m.insert("신규 업체 납기기간", "(직접입력)".to_string());
+    m.insert("향후 정비사항 직접입력", "(직접입력)".to_string());
+    m.insert("향후 정비 예정 사항 직접입력", "(직접입력)".to_string());
     m.insert("비밀여부", "(직접입력)".to_string());
     m.insert("첨부파일", "(직접입력)".to_string());
     m.insert("새-거래처", "(직접입력)".to_string());
     m.insert("신단가", "(직접입력)".to_string());
-    m.insert("공급액", "(직접입력)".to_string());
+    m.insert("공급액", supply_amount_text.clone());
     m.insert("공급가액", supply_amount_text.clone());
     m.insert("공급가액합계", supply_amount_text.clone());
-    m.insert("합계", supply_amount_text);
+    m.insert("합계", supply_amount_text.clone());
+    m.insert("신규 거래업체 단가", unit_price_text.clone());
+    m.insert("신규 거래업체 공급가액", supply_amount_text.clone());
+    m.insert("신규 업체 공급가액 공급가액", supply_amount_text.clone());
+    m.insert("신규거래업체 공급가총액", supply_amount_text.clone());
     m.insert("구단가", unit_price_text);
     m.insert("지급조건", "(직접입력)".to_string());
     m.insert("교체일", row.replacement_dates[0].clone());
@@ -2658,7 +2838,8 @@ fn build_docx_values(row: &DocumentRow, serial: usize) -> BTreeMap<&'static str,
     m.insert("사용일", row.used_date_last.clone());
     m.insert("입고일", row.received_date.clone());
     m.insert("사용처", row.used_where.clone());
-    m.insert("문제점", "(직접입력)".to_string());
+    m.insert("문제점", row.usage_reason.clone());
+    m.insert("교체사유", row.replacement_reason.clone());
     m.insert("파트키", row.part_key.clone());
     m
 }
