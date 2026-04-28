@@ -115,6 +115,8 @@ bash scripts/start_creator_services.sh
 
 Parser service:
 
+https://github.com/H4RUming/legacy-md-indexer 
+
 ```bash
 bash scripts/start_parser_service.sh
 ```
