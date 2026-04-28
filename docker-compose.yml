@@ -16,6 +16,8 @@ services:
         condition: service_healthy
       markdown-pdf-service:
         condition: service_healthy
+      web-service:
+        condition: service_healthy
     healthcheck:
       test: ["CMD", "curl", "--silent", "--fail", "http://127.0.0.1:8080/health"]
       interval: 15s
@@ -115,6 +117,32 @@ services:
       - "host.docker.internal:host-gateway"
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8003/health')"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    networks:
+      - port-project
+
+  web-service:
+    image: port-project-web-service
+    build:
+      context: ./web-service
+      dockerfile: Dockerfile
+      network: host
+      args:
+        PYTHON_BASE_IMAGE: port-project-base-python:3.11-slim
+    environment:
+      WEB_SERVICE_HOST: 0.0.0.0
+      WEB_SERVICE_PORT: 8004
+      PORT_PROJECT_INTERNAL_TOKEN: ${PORT_PROJECT_INTERNAL_TOKEN:?PORT_PROJECT_INTERNAL_TOKEN is required}
+      CHROMIUM_EXECUTABLE_PATH: /usr/bin/chromium
+    ports:
+      - "${WEB_SERVICE_PORT:-8004}:8004"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8004/health')"]
       interval: 15s
       timeout: 5s
       retries: 5

@@ -28,3 +28,9 @@ rust-service/DB/output/
 markdown-pdf-service/output/
 markdown-pdf-service/output.bak.*/
 python-service/*.egg-info/
+
+web-service/.venv/
+web-service/app/__pycache__/
+web-service/*.egg-info/
+.ms-playwright/
+.claude/
