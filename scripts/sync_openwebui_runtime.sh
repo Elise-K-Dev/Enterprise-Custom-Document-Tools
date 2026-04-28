@@ -24,6 +24,7 @@ DEVELOPER_PASSWORD="${DEVELOPER_PASSWORD:-Wis_08171!}"
 DEVELOPER_NAME="${DEVELOPER_NAME:-elise}"
 RUST_TOOL_SERVER_URL="${RUST_TOOL_SERVER_URL:-http://127.0.0.1:8001}"
 PARSER_TOOL_SERVER_URL="${PARSER_TOOL_SERVER_URL:-http://127.0.0.1:8002}"
+WEB_TOOL_SERVER_URL="${WEB_TOOL_SERVER_URL:-http://127.0.0.1:8004}"
 DOCUMENT_FILLER_MODEL_ID="${DOCUMENT_FILLER_MODEL_ID:-gemma-4-31b-it}"
 PORT_PROJECT_INTERNAL_TOKEN="${PORT_PROJECT_INTERNAL_TOKEN:-}"
 
@@ -51,6 +52,7 @@ cd "${ROOT_DIR}"
   -e DEVELOPER_NAME="${DEVELOPER_NAME}" \
   -e RUST_TOOL_SERVER_URL="${RUST_TOOL_SERVER_URL}" \
   -e PARSER_TOOL_SERVER_URL="${PARSER_TOOL_SERVER_URL}" \
+  -e WEB_TOOL_SERVER_URL="${WEB_TOOL_SERVER_URL}" \
   -e DOCUMENT_FILLER_MODEL_ID="${DOCUMENT_FILLER_MODEL_ID}" \
   -e PORT_PROJECT_INTERNAL_TOKEN="${PORT_PROJECT_INTERNAL_TOKEN}" \
   open-webui \
@@ -83,6 +85,7 @@ from open_webui.utils.auth import get_password_hash
 MANAGED_TOOL_IDS = [
     "server:document_search",
     "server:document_generation_tools",
+    "server:web_tools",
 ]
 MODEL_SYSTEM_PROMPT = (
     "당신은 Open WebUI에서 도구 호출을 우선하는 재고/문서 보조 모델이다.\n"
@@ -90,6 +93,7 @@ MODEL_SYSTEM_PROMPT = (
     "사용자가 파일 생성, 다운로드 링크, PDF/Word/Excel 내보내기를 요청하면 일반 답변만으로 끝내지 않는다.\n"
     "- Python 파서/검색 도구(document_search): 내부 문서, 업무보고 원문, 수리 이력, 날짜별 작업 기록, 기존 근거를 찾을 때만 사용한다.\n"
     "- 통합 문서 제작기(document_generation_tools): Rust 품의문 작성기와 Markdown 렌더러를 묶은 도구다. 재고, 품목, 구매 품의서 DOCX/ZIP 생성, 재고 보고서 파일 생성, Markdown 보고서 PDF 렌더링, 보고서/채팅 기록 Word/Excel 내보내기와 다운로드 링크 생성을 처리한다.\n"
+    "- 웹 페이지 가져오기 도구(web_tools): 사용자가 외부 웹 URL을 직접 제공한 경우에만 해당 페이지 본문을 Markdown으로 가져온다. 키워드 인터넷 검색에는 사용하지 않는다.\n"
     "구매문서, 파일 형식, 채팅 기록 내보내기 판단:\n"
     "- 사용자가 파일 형식을 명시하면 그 형식이 최우선이다. PDF라고 명시하면 render_markdown_pdf, 워드/Word/DOCX라고 명시하면 render_chat_docx, 엑셀/Excel/XLSX라고 명시하면 render_chat_xlsx를 우선 호출한다.\n"
     "- 사용자가 재고, 품목, 현재고, 필수재고, 부족수량, 단가, 구매 우선순위, 품의서, 구매문서, 발주를 말하면 통합 문서 제작기의 구매/재고 함수를 우선 사용한다.\n"
@@ -384,6 +388,7 @@ def upsert_tool_server(existing_servers: List[Dict[str, Any]], desired_server: D
 def sync_tool_servers() -> None:
     rust_tool_server_url = os.getenv("RUST_TOOL_SERVER_URL", "http://127.0.0.1:8001").rstrip("/")
     parser_tool_server_url = os.getenv("PARSER_TOOL_SERVER_URL", "http://127.0.0.1:8002").rstrip("/")
+    web_tool_server_url = os.getenv("WEB_TOOL_SERVER_URL", "http://127.0.0.1:8004").rstrip("/")
     internal_token = os.environ["PORT_PROJECT_INTERNAL_TOKEN"]
     internal_headers = {
         "X-Port-Project-Internal-Token": internal_token,
@@ -407,7 +412,7 @@ def sync_tool_servers() -> None:
             "info": {
                 "id": "document_generation_tools",
                 "name": "통합 문서 제작기",
-                "description": "8001 통합 문서 제작기입니다. Rust 품의문 작성기와 Markdown 렌더러를 묶어 구매 품의서 DOCX/ZIP 생성, 재고/품목 조회, 재고 보고서 파일 생성, Markdown 보고서 PDF 렌더링, 보고서/채팅 기록 Word/Excel 내보내기와 다운로드 링크 생성을 처리합니다. 사용자가 명시한 파일 형식을 우선합니다.",
+                "description": "통합 문서 제작기입니다. Rust 품의문 작성기와 Markdown 렌더러를 묶어 구매 품의서 DOCX/ZIP 생성, 재고/품목 조회, 재고 보고서 파일 생성, Markdown 보고서 PDF 렌더링, 보고서/채팅 기록 Word/Excel 내보내기와 다운로드 링크 생성을 처리합니다. 사용자가 명시한 파일 형식을 우선합니다.",
             },
             "config": {
                 "enable": True,
@@ -434,6 +439,25 @@ def sync_tool_servers() -> None:
                 "access_grants": public_read_grants,
             },
         },
+        {
+            "type": "openapi",
+            "url": web_tool_server_url,
+            "spec_type": "url",
+            "path": "/openapi.json",
+            "auth_type": "none",
+            "headers": internal_headers,
+            "key": "",
+            "info": {
+                "id": "web_tools",
+                "name": "웹 페이지 가져오기 도구",
+                "description": "사용자가 외부 웹 URL을 직접 제공하면 그 페이지의 본문을 Markdown으로 추출합니다. 인터넷 검색 기능은 제공하지 않으며, 사내 문서나 레거시 자료 검색에는 사용하지 않습니다.",
+            },
+            "config": {
+                "enable": True,
+                "function_name_filter_list": "fetch_web_page",
+                "access_grants": public_read_grants,
+            },
+        },
     ]
 
     current = TOOL_SERVER_CONNECTIONS.value
@@ -444,6 +468,7 @@ def sync_tool_servers() -> None:
         "document_search",
         "markdown_pdf_tools",
         "legacy_md_search",
+        "web_tools",
     }
     tool_servers = [
         server

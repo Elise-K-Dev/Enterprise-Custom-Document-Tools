@@ -6,6 +6,7 @@ import re
 import hashlib
 import secrets
 import sys
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -83,6 +84,8 @@ LEGACY_PROCESSED_DIR = LEGACY_MD_INDEXER_DIR / "processed_md"
 if str(LEGACY_MD_INDEXER_DIR) not in sys.path:
     sys.path.insert(0, str(LEGACY_MD_INDEXER_DIR))
 _KIWI: Kiwi | None = None
+_LEGACY_RAG_GENERATOR: Any | None = None
+_LEGACY_RAG_GENERATOR_LOCK = threading.RLock()
 OPEN_WEBUI_EMAIL_RANK_MAP = {
     "elise@local.dev": "hi_rank",
     "admin@gmail.com": "hi_rank",
@@ -714,6 +717,23 @@ def is_sensitive_low_rank_query(query: str) -> bool:
     )
 
 
+def get_legacy_rag_generator(api_url: str) -> Any:
+    global _LEGACY_RAG_GENERATOR
+
+    with _LEGACY_RAG_GENERATOR_LOCK:
+        if _LEGACY_RAG_GENERATOR is None:
+            cwd = Path.cwd()
+            try:
+                os.chdir(LEGACY_MD_INDEXER_DIR)
+                from rag_generator import RAGGenerator
+
+                _LEGACY_RAG_GENERATOR = RAGGenerator(str(LEGACY_PROCESSED_DIR))
+            finally:
+                os.chdir(cwd)
+        _LEGACY_RAG_GENERATOR.api_url = api_url
+        return _LEGACY_RAG_GENERATOR
+
+
 def run_original_legacy_search(
     query: str,
     rank: str,
@@ -723,14 +743,13 @@ def run_original_legacy_search(
     try:
         os.chdir(LEGACY_MD_INDEXER_DIR)
         from agentic_router import AgenticRouter
-        from rag_generator import RAGGenerator
 
         api_url = os.getenv(
             "DOCUMENT_FILLER_API_URL",
             "http://192.168.100.13:8000/v1/chat/completions",
         )
         router = AgenticRouter(str(LEGACY_CATALOG_FILE))
-        generator = RAGGenerator(str(LEGACY_PROCESSED_DIR))
+        generator = get_legacy_rag_generator(api_url)
         router.api_url = api_url
         generator.api_url = api_url
 

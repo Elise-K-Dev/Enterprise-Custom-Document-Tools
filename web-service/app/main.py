@@ -24,6 +24,7 @@ app.add_middleware(
 )
 
 
+PUBLIC_BASE_URL = os.getenv("WEB_SERVICE_PUBLIC_BASE_URL", "http://127.0.0.1:8004").rstrip("/")
 INTERNAL_TOKEN_HEADER = "x-port-project-internal-token"
 OPEN_WEBUI_USER_EMAIL_HEADER = "x-openwebui-user-email"
 OPEN_WEBUI_USER_ID_HEADER = "x-openwebui-user-id"
@@ -176,7 +177,7 @@ def openapi_spec() -> dict[str, Any]:
                 "내부 사내 문서 검색에는 사용하지 않는다 (그 용도는 document_search)."
             ),
         },
-        "servers": [{"url": "http://web-service:8004"}],
+        "servers": [{"url": PUBLIC_BASE_URL}],
         "paths": {
             "/health": {
                 "get": {

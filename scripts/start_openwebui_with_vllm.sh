@@ -77,6 +77,22 @@ repair_bind_mount_permissions() {
     >/dev/null
 }
 
+detect_public_host() {
+  python3 - <<'PY'
+import socket
+
+sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+try:
+    try:
+        sock.connect(("1.1.1.1", 80))
+        print(sock.getsockname()[0])
+    except OSError:
+        print("127.0.0.1")
+finally:
+    sock.close()
+PY
+}
+
 if [[ ! -f "${PROJECT_ENV_FILE}" ]] || ! grep -q '^PORT_PROJECT_INTERNAL_TOKEN=' "${PROJECT_ENV_FILE}"; then
   mkdir -p "$(dirname "${PROJECT_ENV_FILE}")"
   TOKEN="$(python3 - <<'PY'
@@ -96,6 +112,17 @@ set -a
 # shellcheck disable=SC1090
 source "${PROJECT_ENV_FILE}"
 set +a
+
+PORT_PROJECT_PUBLIC_HOST="${PORT_PROJECT_PUBLIC_HOST:-$(detect_public_host)}"
+export DOCUMENT_SERVICE_PUBLIC_BASE_URL="http://${PORT_PROJECT_PUBLIC_HOST}:8001"
+export PARSER_PDF_PUBLIC_BASE_URL="http://${PORT_PROJECT_PUBLIC_HOST}:8002"
+export MARKDOWN_PDF_PUBLIC_BASE_URL="http://${PORT_PROJECT_PUBLIC_HOST}:8003"
+
+echo "[INFO] Tool server URLs remain local to Open WebUI containers/host networking"
+echo "[INFO] Download public host: ${PORT_PROJECT_PUBLIC_HOST}"
+echo "[INFO] Document downloads: ${DOCUMENT_SERVICE_PUBLIC_BASE_URL}"
+echo "[INFO] Parser PDF downloads: ${PARSER_PDF_PUBLIC_BASE_URL}"
+echo "[INFO] Markdown renderer downloads: ${MARKDOWN_PDF_PUBLIC_BASE_URL}"
 
 echo "[INFO] Preparing local Docker base image aliases..."
 ensure_local_image "python:3.11-slim" "port-project-base-python:3.11-slim"
@@ -176,6 +203,10 @@ build_service_image \
   "${ROOT_DIR}/Port-Project/markdown-pdf-service" \
   "port-project-markdown-pdf-service" \
   --build-arg PYTHON_BASE_IMAGE=port-project-base-python:3.11-slim
+build_service_image \
+  "${ROOT_DIR}/Port-Project/web-service" \
+  "port-project-web-service" \
+  --build-arg PYTHON_BASE_IMAGE=port-project-base-python:3.11-slim
 
 OPEN_WEBUI_IMAGE="${IMAGE_NAME}" "${DOCKER_BIN}" compose "${COMPOSE_ARGS[@]}" up -d --no-build
 
@@ -190,6 +221,7 @@ done
 echo "[INFO] Syncing Open WebUI runtime state..."
 RUST_TOOL_SERVER_URL="${RUST_TOOL_SERVER_URL:-http://127.0.0.1:8001}" \
 PARSER_TOOL_SERVER_URL="${PARSER_TOOL_SERVER_URL:-http://127.0.0.1:8002}" \
+WEB_TOOL_SERVER_URL="${WEB_TOOL_SERVER_URL:-http://127.0.0.1:8004}" \
 "${ROOT_DIR}/Port-Project/scripts/sync_openwebui_runtime.sh"
 
 echo "[INFO] Open WebUI started: http://127.0.0.1:${HOST_PORT}"
