@@ -6,7 +6,6 @@ ARG APP_GID=1000
 
 RUN apt-get update \
   && apt-get install -y --no-install-recommends \
-    chromium \
     fonts-noto-cjk \
     fonts-noto-color-emoji \
     ca-certificates \
@@ -17,11 +16,16 @@ RUN groupadd --gid "${APP_GID}" app \
 COPY pyproject.toml pyproject.toml
 COPY app app
 RUN pip install --no-cache-dir .
-RUN chown -R app:app /app
+# Install Playwright Chromium + system dependencies (used by crawl4ai)
+RUN playwright install --with-deps chromium
+# Move browsers cache to a known path under the app user's home so it's available at runtime
+ENV PLAYWRIGHT_BROWSERS_PATH=/home/app/.cache/ms-playwright
+RUN mkdir -p "${PLAYWRIGHT_BROWSERS_PATH}" \
+  && cp -r /root/.cache/ms-playwright/* "${PLAYWRIGHT_BROWSERS_PATH}/" \
+  && chown -R app:app /app /home/app/.cache
 
 ENV WEB_SERVICE_HOST=0.0.0.0
 ENV WEB_SERVICE_PORT=8004
-ENV CHROMIUM_EXECUTABLE_PATH=/usr/bin/chromium
 EXPOSE 8004
 
 USER app

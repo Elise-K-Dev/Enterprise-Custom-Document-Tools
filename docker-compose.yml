@@ -136,7 +136,6 @@ services:
       WEB_SERVICE_HOST: 0.0.0.0
       WEB_SERVICE_PORT: 8004
       PORT_PROJECT_INTERNAL_TOKEN: ${PORT_PROJECT_INTERNAL_TOKEN:?PORT_PROJECT_INTERNAL_TOKEN is required}
-      CHROMIUM_EXECUTABLE_PATH: /usr/bin/chromium
     ports:
       - "${WEB_SERVICE_PORT:-8004}:8004"
     extra_hosts:

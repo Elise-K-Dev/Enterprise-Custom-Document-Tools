@@ -3,18 +3,18 @@ from __future__ import annotations
 import os
 import secrets
 from datetime import datetime, timezone
-from typing import Any, Literal
+from typing import Any
 from urllib.parse import urlparse
 
-import httpx
-import trafilatura
+from crawl4ai import AsyncWebCrawler, BrowserConfig, CrawlerRunConfig
+from crawl4ai.content_filter_strategy import PruningContentFilter
+from crawl4ai.markdown_generation_strategy import DefaultMarkdownGenerator
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from playwright.async_api import async_playwright
 from pydantic import BaseModel, Field
 
 
-app = FastAPI(title="web-service", version="0.1.0", openapi_url=None)
+app = FastAPI(title="web-service", version="0.2.0", openapi_url=None)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -24,20 +24,13 @@ app.add_middleware(
 )
 
 
-CHROMIUM_EXECUTABLE_PATH = os.getenv("CHROMIUM_EXECUTABLE_PATH", "/usr/bin/chromium")
 INTERNAL_TOKEN_HEADER = "x-port-project-internal-token"
 OPEN_WEBUI_USER_EMAIL_HEADER = "x-openwebui-user-email"
 OPEN_WEBUI_USER_ID_HEADER = "x-openwebui-user-id"
 
-USER_AGENT = (
-    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
-    "(KHTML, like Gecko) Chrome/124.0 Safari/537.36 PortProjectWebService/0.1"
-)
-
-DEFAULT_FETCH_TIMEOUT = 15.0
-PLAYWRIGHT_TIMEOUT_MS = 25_000
-MIN_STATIC_TEXT_CHARS = 400
-MAX_BODY_BYTES = 5 * 1024 * 1024
+# Crawler defaults. delay_before_return_html lets SPA pages finish hydration.
+SPA_HYDRATION_DELAY_SECONDS = float(os.getenv("WEB_SPA_HYDRATION_DELAY", "2.0"))
+PRUNING_THRESHOLD = float(os.getenv("WEB_PRUNING_THRESHOLD", "0.48"))
 
 
 def configured_internal_token() -> str:
@@ -75,108 +68,67 @@ def validate_url(url: str) -> str:
     return cleaned
 
 
-async def fetch_static(url: str) -> tuple[str, str]:
-    """Return (final_url, html). Raises HTTPException on failure."""
-    try:
-        async with httpx.AsyncClient(
-            follow_redirects=True,
-            timeout=DEFAULT_FETCH_TIMEOUT,
-            headers={"User-Agent": USER_AGENT, "Accept-Language": "ko,en;q=0.8"},
-        ) as client:
-            response = await client.get(url)
-    except httpx.TimeoutException as exc:
-        raise HTTPException(status_code=504, detail=f"timeout fetching {url}") from exc
-    except httpx.HTTPError as exc:
-        raise HTTPException(status_code=502, detail=f"network error fetching {url}: {exc}") from exc
+def build_run_config() -> CrawlerRunConfig:
+    return CrawlerRunConfig(
+        markdown_generator=DefaultMarkdownGenerator(
+            content_filter=PruningContentFilter(
+                threshold=PRUNING_THRESHOLD,
+                threshold_type="dynamic",
+            ),
+        ),
+        delay_before_return_html=SPA_HYDRATION_DELAY_SECONDS,
+    )
 
-    if response.status_code >= 400:
+
+def select_markdown(result: Any) -> str:
+    """Prefer fit_markdown (after pruning) over raw_markdown.
+    Falls back to raw if pruning removed everything."""
+    md = getattr(result, "markdown", None)
+    if md is None:
+        return ""
+    fit = (getattr(md, "fit_markdown", "") or "").strip()
+    if fit:
+        return fit
+    raw = (getattr(md, "raw_markdown", "") or "").strip()
+    if raw:
+        return raw
+    return str(md).strip()
+
+
+async def crawl_once(url: str) -> dict[str, Any]:
+    browser = BrowserConfig(headless=True, verbose=False)
+    config = build_run_config()
+    async with AsyncWebCrawler(config=browser) as crawler:
+        result = await crawler.arun(url=url, config=config)
+
+    if not result.success and not getattr(result, "html", ""):
+        detail = getattr(result, "error_message", None) or "fetch failed"
+        raise HTTPException(status_code=502, detail=f"fetch failed for {url}: {detail}")
+
+    markdown = select_markdown(result)
+    metadata = result.metadata or {}
+    title = (metadata.get("title") or "").strip()
+    author = (metadata.get("author") or "").strip()
+    published = (metadata.get("published_time") or metadata.get("date") or "").strip()
+
+    if not markdown and not title:
         raise HTTPException(
-            status_code=502,
-            detail=f"upstream returned {response.status_code} for {url}",
+            status_code=422,
+            detail=f"could not extract any readable content from {url}",
         )
 
-    content_type = response.headers.get("content-type", "")
-    if "html" not in content_type and "xml" not in content_type and "text" not in content_type:
-        raise HTTPException(status_code=415, detail=f"unsupported content-type: {content_type}")
-
-    body_bytes = response.content[:MAX_BODY_BYTES]
-    return str(response.url), body_bytes.decode(response.encoding or "utf-8", errors="replace")
-
-
-async def fetch_rendered(url: str) -> tuple[str, str]:
-    """Render with Playwright (Chromium). Returns (final_url, html)."""
-    async with async_playwright() as pw:
-        browser = await pw.chromium.launch(
-            executable_path=CHROMIUM_EXECUTABLE_PATH if os.path.exists(CHROMIUM_EXECUTABLE_PATH) else None,
-            args=["--no-sandbox", "--disable-dev-shm-usage"],
-        )
-        try:
-            context = await browser.new_context(user_agent=USER_AGENT, locale="ko-KR")
-            page = await context.new_page()
-            try:
-                await page.goto(url, timeout=PLAYWRIGHT_TIMEOUT_MS, wait_until="networkidle")
-            except Exception:
-                await page.goto(url, timeout=PLAYWRIGHT_TIMEOUT_MS, wait_until="domcontentloaded")
-            html = await page.content()
-            final_url = page.url
-            return final_url, html
-        finally:
-            await browser.close()
-
-
-def extract_main_content(html: str, url: str) -> dict[str, Any]:
-    markdown = trafilatura.extract(
-        html,
-        url=url,
-        output_format="markdown",
-        include_links=True,
-        include_tables=True,
-        favor_recall=True,
-    ) or ""
-    metadata = trafilatura.extract_metadata(html, default_url=url)
-    title = ""
-    author = ""
-    published = ""
-    if metadata is not None:
-        title = (metadata.title or "").strip()
-        author = (metadata.author or "").strip()
-        published = (metadata.date or "").strip()
     return {
+        "url": result.url or url,
         "title": title,
         "author": author,
         "published": published,
-        "markdown": markdown.strip(),
+        "markdown": markdown,
+        "status_code": result.status_code or 0,
     }
-
-
-async def fetch_and_extract(url: str, render: Literal["auto", "static", "js"]) -> dict[str, Any]:
-    final_url = url
-    html_body = ""
-    used_renderer = "static"
-
-    if render in ("auto", "static"):
-        final_url, html_body = await fetch_static(url)
-        extracted = extract_main_content(html_body, final_url)
-        if render == "static":
-            return {**extracted, "url": final_url, "renderer": "static"}
-        if len(extracted["markdown"]) >= MIN_STATIC_TEXT_CHARS:
-            return {**extracted, "url": final_url, "renderer": "static"}
-        used_renderer = "js"
-
-    if render == "js" or used_renderer == "js":
-        final_url, html_body = await fetch_rendered(url)
-        extracted = extract_main_content(html_body, final_url)
-        return {**extracted, "url": final_url, "renderer": "js"}
-
-    raise HTTPException(status_code=500, detail="unreachable fetch branch")
 
 
 class FetchRequest(BaseModel):
     url: str = Field(..., description="대상 페이지 URL (http 또는 https)")
-    render: Literal["auto", "static", "js"] = Field(
-        "auto",
-        description="auto: 정적 시도 후 본문이 짧으면 JS 렌더링. static: 정적만. js: Playwright 강제",
-    )
 
 
 class FetchResponse(BaseModel):
@@ -185,7 +137,7 @@ class FetchResponse(BaseModel):
     author: str
     published: str
     markdown: str
-    renderer: Literal["static", "js"]
+    status_code: int
     fetched_at: str
 
 
@@ -198,14 +150,14 @@ def health() -> dict[str, str]:
 async def web_fetch(req: FetchRequest, raw_request: Request) -> FetchResponse:
     require_registered_tool_user(raw_request)
     url = validate_url(req.url)
-    extracted = await fetch_and_extract(url, req.render)
+    extracted = await crawl_once(url)
     return FetchResponse(
         url=extracted["url"],
         title=extracted["title"],
         author=extracted["author"],
         published=extracted["published"],
         markdown=extracted["markdown"],
-        renderer=extracted["renderer"],
+        status_code=extracted["status_code"],
         fetched_at=datetime.now(timezone.utc).isoformat(),
     )
 
@@ -216,7 +168,7 @@ def openapi_spec() -> dict[str, Any]:
         "openapi": "3.0.0",
         "info": {
             "title": "Web Fetch",
-            "version": "0.1.0",
+            "version": "0.2.0",
             "description": (
                 "사용자가 제공한 외부 웹 URL의 본문을 가져오는 도구. "
                 "이 도구는 검색 기능을 제공하지 않는다. 사용자가 키워드 검색을 요청하면 "
@@ -239,7 +191,7 @@ def openapi_spec() -> dict[str, Any]:
                     "summary": "단일 웹페이지 본문을 Markdown으로 가져오기",
                     "description": (
                         "사용자가 URL을 직접 제공하면 이 도구로 페이지를 가져와 본문 Markdown과 제목, 작성자, 작성일을 추출한다. "
-                        "JavaScript 렌더링이 필요한 페이지는 자동으로 Playwright로 폴백된다. "
+                        "내부적으로 헤드리스 Chromium으로 렌더링하므로 SPA, 쇼핑몰, 포럼 등 JavaScript 페이지도 처리된다. "
                         "사용자가 키워드로 인터넷 검색을 요청한 경우에는 이 도구를 호출하지 말고, "
                         "'현재 인터넷 검색 기능은 제공하지 않습니다. 확인하실 페이지의 URL을 직접 알려주시면 내용을 가져와 드리겠습니다.'라고 안내한다. "
                         "사내 문서나 레거시 자료에는 사용하지 않는다."
@@ -255,12 +207,6 @@ def openapi_spec() -> dict[str, Any]:
                                         "url": {
                                             "type": "string",
                                             "description": "가져올 페이지의 http/https URL",
-                                        },
-                                        "render": {
-                                            "type": "string",
-                                            "enum": ["auto", "static", "js"],
-                                            "default": "auto",
-                                            "description": "auto는 정적 시도 후 짧으면 JS 렌더링, static은 정적만, js는 Playwright 강제",
                                         },
                                     },
                                 }
@@ -280,7 +226,7 @@ def openapi_spec() -> dict[str, Any]:
                                             "author": {"type": "string"},
                                             "published": {"type": "string"},
                                             "markdown": {"type": "string"},
-                                            "renderer": {"type": "string"},
+                                            "status_code": {"type": "integer"},
                                             "fetched_at": {"type": "string"},
                                         },
                                     }
