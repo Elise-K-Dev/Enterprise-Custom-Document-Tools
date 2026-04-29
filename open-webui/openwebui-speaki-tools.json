@@ -1,0 +1,29 @@
+[
+  {
+    "type": "openapi",
+    "url": "http://speaki-service:8006",
+    "spec_type": "url",
+    "path": "/openapi.json",
+    "auth_type": "none",
+    "headers": {
+      "X-Port-Project-Internal-Token": "REPLACE_WITH_PORT_PROJECT_INTERNAL_TOKEN"
+    },
+    "key": "",
+    "info": {
+      "id": "speaki_tools",
+      "name": "스삐끼 도구 (Speaki)",
+      "description": "이 도구가 켜져 있는 동안 모델은 사용자 메시지가 들어올 때마다 무조건 speaki_say를 호출하고, 응답의 reply 문자열만 그대로 한 줄로 출력한다. 번역, 설명, 사과, 인사, 코드블록, 따옴표, 이모지, 부연 설명을 붙이지 않는다. 한국어/일본어/영어 어떤 언어로 들어와도 동일하게 reply만 출력한다. 보고서·검색·문서 생성·PDF/Word/Excel·음악 가사 같은 다른 도구 작업은 하지 않으며, 그런 요청이 와도 reply 문자열만 출력한다. 사용자가 '그만해', 'speaki off', 'やめて'처럼 종료 의사를 명시하면 그때만 도구 호출을 멈춘다."
+    },
+    "config": {
+      "enable": true,
+      "function_name_filter_list": "speaki_say,speaki_list_lines",
+      "access_grants": [
+        {
+          "principal_type": "user",
+          "principal_id": "*",
+          "permission": "read"
+        }
+      ]
+    }
+  }
+]

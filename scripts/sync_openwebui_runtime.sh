@@ -26,6 +26,7 @@ RUST_TOOL_SERVER_URL="${RUST_TOOL_SERVER_URL:-http://127.0.0.1:8001}"
 PARSER_TOOL_SERVER_URL="${PARSER_TOOL_SERVER_URL:-http://127.0.0.1:8002}"
 WEB_TOOL_SERVER_URL="${WEB_TOOL_SERVER_URL:-http://127.0.0.1:8004}"
 SUNO_TOOL_SERVER_URL="${SUNO_TOOL_SERVER_URL:-http://127.0.0.1:8005}"
+SPEAKI_TOOL_SERVER_URL="${SPEAKI_TOOL_SERVER_URL:-http://127.0.0.1:8006}"
 WON_CONFIRM_TOOL_SERVER_URL="${WON_CONFIRM_TOOL_SERVER_URL:-http://127.0.0.1:8010}"
 WON_CONFIRM_ALLOWED_EMAILS="${WON_CONFIRM_ALLOWED_EMAILS:-${DEVELOPER_EMAIL},sock@local.dev}"
 WON_CONFIRM_ALLOWED_NAMES="${WON_CONFIRM_ALLOWED_NAMES:-${DEVELOPER_NAME},Sock}"
@@ -58,6 +59,7 @@ cd "${ROOT_DIR}"
   -e PARSER_TOOL_SERVER_URL="${PARSER_TOOL_SERVER_URL}" \
   -e WEB_TOOL_SERVER_URL="${WEB_TOOL_SERVER_URL}" \
   -e SUNO_TOOL_SERVER_URL="${SUNO_TOOL_SERVER_URL}" \
+  -e SPEAKI_TOOL_SERVER_URL="${SPEAKI_TOOL_SERVER_URL}" \
   -e WON_CONFIRM_TOOL_SERVER_URL="${WON_CONFIRM_TOOL_SERVER_URL}" \
   -e WON_CONFIRM_ALLOWED_EMAILS="${WON_CONFIRM_ALLOWED_EMAILS}" \
   -e WON_CONFIRM_ALLOWED_NAMES="${WON_CONFIRM_ALLOWED_NAMES}" \
@@ -95,6 +97,7 @@ MANAGED_TOOL_IDS = [
     "server:document_generation_tools",
     "server:web_tools",
     "server:suno_tools",
+    "server:speaki_tools",
 ]
 MODEL_SYSTEM_PROMPT = (
     "당신은 Open WebUI에서 도구 호출을 우선하는 재고/문서 보조 모델이다.\n"
@@ -104,6 +107,7 @@ MODEL_SYSTEM_PROMPT = (
     "- 통합 문서 제작기(document_generation_tools): Rust 품의문 작성기와 Markdown 렌더러를 묶은 도구다. 재고, 품목, 구매 품의서 DOCX/ZIP 생성, 재고 보고서 파일 생성, Markdown 보고서 PDF 렌더링, 보고서/채팅 기록 Word/Excel 내보내기와 다운로드 링크 생성을 처리한다.\n"
     "- 웹 페이지 가져오기 도구(web_tools): 사용자가 외부 웹 URL을 직접 제공한 경우에만 해당 페이지 본문을 Markdown으로 가져온다. 키워드 인터넷 검색에는 사용하지 않는다.\n"
     "- Suno 작사·스타일 프롬프트 도구(suno_tools): 사용자가 노래, 가사, Suno, 작사, 스타일 프롬프트, 음악 생성 프롬프트를 말하면 호출한다. 가사 생성은 generate_suno_lyrics, 가사 보완은 improve_suno_lyrics, Suno Style 필드용 프롬프트 생성은 generate_suno_style_prompt, 그 개선은 improve_suno_style_prompt를 사용한다. 사내 문서 검색이나 보고서 PDF에는 사용하지 않는다.\n"
+    "- 스삐끼 도구(speaki_tools): 이 도구가 켜져 있으면 사용자가 어떤 말을 하든 무조건 speaki_say를 호출하고, 응답 reply 문자열을 그대로 한 줄로만 출력한다. 번역, 설명, 사과, 인사, 코드블록, 따옴표, 이모지, 부연 설명을 붙이지 않는다. 한국어/일본어/영어 어떤 언어로 들어와도 동일하게 reply만 출력한다. 보고서·검색·문서 생성·PDF/Word/Excel·음악 가사 같은 다른 도구의 일은 하지 않으며, 그런 요청이 와도 reply 문자열만 출력한다. 사용자가 그만해, speaki off, やめて처럼 종료 의사를 명시하면 그때만 도구 호출을 멈춘다.\n"
     "구매문서, 파일 형식, 채팅 기록 내보내기 판단:\n"
     "- 사용자가 파일 형식을 명시하면 그 형식이 최우선이다. PDF라고 명시하면 render_markdown_pdf, 워드/Word/DOCX라고 명시하면 render_chat_docx, 엑셀/Excel/XLSX라고 명시하면 render_chat_xlsx를 우선 호출한다.\n"
     "- 사용자가 재고, 품목, 현재고, 필수재고, 부족수량, 단가, 구매 우선순위, 품의서, 구매문서, 발주를 말하면 통합 문서 제작기의 구매/재고 함수를 우선 사용한다.\n"
@@ -440,6 +444,7 @@ async def sync_tool_servers() -> None:
     parser_tool_server_url = os.getenv("PARSER_TOOL_SERVER_URL", "http://127.0.0.1:8002").rstrip("/")
     web_tool_server_url = os.getenv("WEB_TOOL_SERVER_URL", "http://127.0.0.1:8004").rstrip("/")
     suno_tool_server_url = os.getenv("SUNO_TOOL_SERVER_URL", "http://127.0.0.1:8005").rstrip("/")
+    speaki_tool_server_url = os.getenv("SPEAKI_TOOL_SERVER_URL", "http://127.0.0.1:8006").rstrip("/")
     won_confirm_tool_server_url = os.getenv("WON_CONFIRM_TOOL_SERVER_URL", "http://127.0.0.1:8010").rstrip("/")
     internal_token = os.environ["PORT_PROJECT_INTERNAL_TOKEN"]
     internal_headers = {
@@ -532,6 +537,25 @@ async def sync_tool_servers() -> None:
         },
         {
             "type": "openapi",
+            "url": speaki_tool_server_url,
+            "spec_type": "url",
+            "path": "/openapi.json",
+            "auth_type": "none",
+            "headers": internal_headers,
+            "key": "",
+            "info": {
+                "id": "speaki_tools",
+                "name": "스삐끼 도구 (Speaki)",
+                "description": "이 도구가 켜져 있는 동안 모델은 사용자 메시지가 들어올 때마다 무조건 speaki_say를 호출하고, 응답의 reply 문자열만 그대로 한 줄로 출력한다. 번역, 설명, 사과, 인사, 코드블록, 따옴표, 이모지, 부연 설명을 붙이지 않는다. 한국어/일본어/영어 어떤 언어로 들어와도 동일하게 reply만 출력한다. 보고서·검색·문서 생성·PDF/Word/Excel·음악 가사 같은 다른 도구 작업은 하지 않으며, 그런 요청이 와도 reply 문자열만 출력한다. 사용자가 그만해, speaki off, やめて처럼 종료 의사를 명시하면 그때만 도구 호출을 멈춘다.",
+            },
+            "config": {
+                "enable": True,
+                "function_name_filter_list": "speaki_say,speaki_list_lines",
+                "access_grants": public_read_grants,
+            },
+        },
+        {
+            "type": "openapi",
             "url": won_confirm_tool_server_url,
             "spec_type": "url",
             "path": "/openapi.json",
@@ -561,6 +585,7 @@ async def sync_tool_servers() -> None:
         "legacy_md_search",
         "web_tools",
         "suno_tools",
+        "speaki_tools",
         "won_confirm",
     }
     tool_servers = [
