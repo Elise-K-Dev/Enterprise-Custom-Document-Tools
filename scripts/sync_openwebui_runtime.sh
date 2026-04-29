@@ -25,6 +25,7 @@ DEVELOPER_NAME="${DEVELOPER_NAME:-elise}"
 RUST_TOOL_SERVER_URL="${RUST_TOOL_SERVER_URL:-http://127.0.0.1:8001}"
 PARSER_TOOL_SERVER_URL="${PARSER_TOOL_SERVER_URL:-http://127.0.0.1:8002}"
 WEB_TOOL_SERVER_URL="${WEB_TOOL_SERVER_URL:-http://127.0.0.1:8004}"
+SUNO_TOOL_SERVER_URL="${SUNO_TOOL_SERVER_URL:-http://127.0.0.1:8005}"
 DOCUMENT_FILLER_MODEL_ID="${DOCUMENT_FILLER_MODEL_ID:-gemma-4-31b-it}"
 PORT_PROJECT_INTERNAL_TOKEN="${PORT_PROJECT_INTERNAL_TOKEN:-}"
 
@@ -53,6 +54,7 @@ cd "${ROOT_DIR}"
   -e RUST_TOOL_SERVER_URL="${RUST_TOOL_SERVER_URL}" \
   -e PARSER_TOOL_SERVER_URL="${PARSER_TOOL_SERVER_URL}" \
   -e WEB_TOOL_SERVER_URL="${WEB_TOOL_SERVER_URL}" \
+  -e SUNO_TOOL_SERVER_URL="${SUNO_TOOL_SERVER_URL}" \
   -e DOCUMENT_FILLER_MODEL_ID="${DOCUMENT_FILLER_MODEL_ID}" \
   -e PORT_PROJECT_INTERNAL_TOKEN="${PORT_PROJECT_INTERNAL_TOKEN}" \
   open-webui \
@@ -86,6 +88,7 @@ MANAGED_TOOL_IDS = [
     "server:document_search",
     "server:document_generation_tools",
     "server:web_tools",
+    "server:suno_tools",
 ]
 MODEL_SYSTEM_PROMPT = (
     "당신은 Open WebUI에서 도구 호출을 우선하는 재고/문서 보조 모델이다.\n"
@@ -94,6 +97,7 @@ MODEL_SYSTEM_PROMPT = (
     "- Python 파서/검색 도구(document_search): 내부 문서, 업무보고 원문, 수리 이력, 날짜별 작업 기록, 기존 근거를 찾을 때만 사용한다.\n"
     "- 통합 문서 제작기(document_generation_tools): Rust 품의문 작성기와 Markdown 렌더러를 묶은 도구다. 재고, 품목, 구매 품의서 DOCX/ZIP 생성, 재고 보고서 파일 생성, Markdown 보고서 PDF 렌더링, 보고서/채팅 기록 Word/Excel 내보내기와 다운로드 링크 생성을 처리한다.\n"
     "- 웹 페이지 가져오기 도구(web_tools): 사용자가 외부 웹 URL을 직접 제공한 경우에만 해당 페이지 본문을 Markdown으로 가져온다. 키워드 인터넷 검색에는 사용하지 않는다.\n"
+    "- Suno 작사·스타일 프롬프트 도구(suno_tools): 사용자가 노래, 가사, Suno, 작사, 스타일 프롬프트, 음악 생성 프롬프트를 말하면 호출한다. 가사 생성은 generate_suno_lyrics, 가사 보완은 improve_suno_lyrics, Suno Style 필드용 프롬프트 생성은 generate_suno_style_prompt, 그 개선은 improve_suno_style_prompt를 사용한다. 사내 문서 검색이나 보고서 PDF에는 사용하지 않는다.\n"
     "구매문서, 파일 형식, 채팅 기록 내보내기 판단:\n"
     "- 사용자가 파일 형식을 명시하면 그 형식이 최우선이다. PDF라고 명시하면 render_markdown_pdf, 워드/Word/DOCX라고 명시하면 render_chat_docx, 엑셀/Excel/XLSX라고 명시하면 render_chat_xlsx를 우선 호출한다.\n"
     "- 사용자가 재고, 품목, 현재고, 필수재고, 부족수량, 단가, 구매 우선순위, 품의서, 구매문서, 발주를 말하면 통합 문서 제작기의 구매/재고 함수를 우선 사용한다.\n"
@@ -389,6 +393,7 @@ def sync_tool_servers() -> None:
     rust_tool_server_url = os.getenv("RUST_TOOL_SERVER_URL", "http://127.0.0.1:8001").rstrip("/")
     parser_tool_server_url = os.getenv("PARSER_TOOL_SERVER_URL", "http://127.0.0.1:8002").rstrip("/")
     web_tool_server_url = os.getenv("WEB_TOOL_SERVER_URL", "http://127.0.0.1:8004").rstrip("/")
+    suno_tool_server_url = os.getenv("SUNO_TOOL_SERVER_URL", "http://127.0.0.1:8005").rstrip("/")
     internal_token = os.environ["PORT_PROJECT_INTERNAL_TOKEN"]
     internal_headers = {
         "X-Port-Project-Internal-Token": internal_token,
@@ -458,6 +463,25 @@ def sync_tool_servers() -> None:
                 "access_grants": public_read_grants,
             },
         },
+        {
+            "type": "openapi",
+            "url": suno_tool_server_url,
+            "spec_type": "url",
+            "path": "/openapi.json",
+            "auth_type": "none",
+            "headers": internal_headers,
+            "key": "",
+            "info": {
+                "id": "suno_tools",
+                "name": "Suno 작사·스타일 프롬프트 도구",
+                "description": "Suno V5/V5.5용 노래 가사 작성·개선과 Style 필드 프롬프트 작성·개선을 수행합니다. 사용자가 노래, 가사, Suno, 작사, 스타일 프롬프트, 음악 생성 프롬프트를 말하면 호출합니다. 사내 문서 검색이나 일반 보고서 PDF 생성에는 사용하지 않습니다.",
+            },
+            "config": {
+                "enable": True,
+                "function_name_filter_list": "generate_suno_lyrics,improve_suno_lyrics,generate_suno_style_prompt,improve_suno_style_prompt",
+                "access_grants": public_read_grants,
+            },
+        },
     ]
 
     current = TOOL_SERVER_CONNECTIONS.value
@@ -469,6 +493,7 @@ def sync_tool_servers() -> None:
         "markdown_pdf_tools",
         "legacy_md_search",
         "web_tools",
+        "suno_tools",
     }
     tool_servers = [
         server
