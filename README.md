@@ -6,7 +6,7 @@ BrainLess는 Open WebUI에 붙여 쓰는 별도 도구 모듈 묶음입니다.
 
 ## Included Modules
 
-- `Pink_Sphinx_Module`: 교수 스타일 계획 검토 도구
+- `Pink_Sphinx_Module`: 계획 검토 도구
 - `suno-service`: Suno 가사 및 스타일 프롬프트 도구
 - `speaki-service`: Speaki 응답 도구
 - `open-webui`: Open WebUI 도구 가져오기용 JSON
