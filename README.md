@@ -212,7 +212,7 @@ Open WebUI import 예시:
 
 ## Repository Notes
 
-- 대용량 인덱스 산출물과 로컬 빌드 폴더는 저장소에서 제외합니다.
+- 대용량 인댁스 산출물과 로컬 빌드 폴더는 저장소에서 제외합니다.
 - 실제 운영용 계정 정보와 `.env` 파일은 커밋하지 않습니다.
 - `python-service/legacy-md-indexer-main` 아래 문서 카탈로그와 검색 코드는 보존하되, 생성된 `processed_md` 데이터는 제외합니다.
 - `markdown-pdf-service/output`, `markdown-pdf-service/output.bak.*`, Python `*.egg-info` 같은 생성 산출물은 커밋하지 않습니다.
