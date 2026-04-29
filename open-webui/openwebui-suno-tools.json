@@ -1,0 +1,27 @@
+[
+  {
+    "type": "openapi",
+    "url": "http://suno-service:8005",
+    "spec_type": "url",
+    "path": "/openapi.json",
+    "auth_type": "none",
+    "headers": null,
+    "key": "",
+    "info": {
+      "id": "suno_tools",
+      "name": "Suno 작사·스타일 프롬프트 도구",
+      "description": "Suno V5/V5.5용 노래 가사 작성·개선과 Style 필드 프롬프트 작성·개선을 수행합니다. 사용자가 노래, 가사, Suno, 작사, 스타일 프롬프트, 음악 생성 프롬프트를 말하면 호출합니다. 사내 문서 검색(document_search)이나 일반 보고서 PDF 생성(document_generation_tools)에는 사용하지 않습니다."
+    },
+    "config": {
+      "enable": true,
+      "function_name_filter_list": "generate_suno_lyrics,improve_suno_lyrics,generate_suno_style_prompt,improve_suno_style_prompt",
+      "access_grants": [
+        {
+          "principal_type": "user",
+          "principal_id": "*",
+          "permission": "read"
+        }
+      ]
+    }
+  }
+]

@@ -18,6 +18,8 @@ services:
         condition: service_healthy
       web-service:
         condition: service_healthy
+      suno-service:
+        condition: service_healthy
     healthcheck:
       test: ["CMD", "curl", "--silent", "--fail", "http://127.0.0.1:8080/health"]
       interval: 15s
@@ -143,6 +145,38 @@ services:
       - "host.docker.internal:host-gateway"
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8004/health')"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    networks:
+      - port-project
+
+  suno-service:
+    image: port-project-suno-service
+    build:
+      context: ./suno-service
+      dockerfile: Dockerfile
+      network: host
+      args:
+        PYTHON_BASE_IMAGE: port-project-base-python:3.11-slim
+    environment:
+      SUNO_SERVICE_HOST: 0.0.0.0
+      SUNO_SERVICE_PORT: 8005
+      SUNO_SERVICE_PUBLIC_BASE_URL: ${SUNO_SERVICE_PUBLIC_BASE_URL:-http://127.0.0.1:8005}
+      SUNO_LLM_API_URL: ${SUNO_LLM_API_URL:-http://192.168.100.13:8000/v1/chat/completions}
+      SUNO_LLM_MODEL_ID: ${SUNO_LLM_MODEL_ID:-gemma-4-31b-it}
+      SUNO_TEMPLATE_DIR: /app/templates
+      SUNO_GUIDE_HOT_RELOAD: ${SUNO_GUIDE_HOT_RELOAD:-false}
+      PORT_PROJECT_INTERNAL_TOKEN: ${PORT_PROJECT_INTERNAL_TOKEN:?PORT_PROJECT_INTERNAL_TOKEN is required}
+    ports:
+      - "${SUNO_SERVICE_PORT:-8005}:8005"
+    volumes:
+      - ./suno-service/templates:/app/templates:ro
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8005/health')"]
       interval: 15s
       timeout: 5s
       retries: 5
