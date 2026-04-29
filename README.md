@@ -1,5 +1,9 @@
 # Enterprise Custom Document Tools
 
+
+<img width="480" height="480" alt="image" src="https://github.com/user-attachments/assets/bf182107-1c35-489f-a71f-f9a93e65be84" />
+
+
 Open WebUI를 프런트로 두고, 도구는 `Python 파서/검색 도구`와 `통합 문서 제작기` 두 축으로 구성한 사내 문서 자동화 워크스페이스입니다. 통합 문서 제작기는 Rust 기반 구매 품의문 작성기와 Markdown PDF/Word/Excel 렌더러를 묶어 재고 조회, 품의서 작성, 보고서 파일 생성을 처리합니다.
 
 ## Overview
