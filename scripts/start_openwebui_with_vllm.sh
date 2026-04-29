@@ -211,6 +211,10 @@ build_service_image \
   "${ROOT_DIR}/Port-Project/suno-service" \
   "port-project-suno-service" \
   --build-arg PYTHON_BASE_IMAGE=port-project-base-python:3.11-slim
+build_service_image \
+  "${ROOT_DIR}/Port-Project/Pink_Sphinx_Module" \
+  "port-project-pink-sphinx-module" \
+  --build-arg PYTHON_BASE_IMAGE=port-project-base-python:3.11-slim
 
 OPEN_WEBUI_IMAGE="${IMAGE_NAME}" "${DOCKER_BIN}" compose "${COMPOSE_ARGS[@]}" up -d --no-build
 
@@ -227,6 +231,7 @@ RUST_TOOL_SERVER_URL="${RUST_TOOL_SERVER_URL:-http://127.0.0.1:8001}" \
 PARSER_TOOL_SERVER_URL="${PARSER_TOOL_SERVER_URL:-http://127.0.0.1:8002}" \
 WEB_TOOL_SERVER_URL="${WEB_TOOL_SERVER_URL:-http://127.0.0.1:8004}" \
 SUNO_TOOL_SERVER_URL="${SUNO_TOOL_SERVER_URL:-http://127.0.0.1:8005}" \
+WON_CONFIRM_TOOL_SERVER_URL="${WON_CONFIRM_TOOL_SERVER_URL:-http://127.0.0.1:8010}" \
 "${ROOT_DIR}/Port-Project/scripts/sync_openwebui_runtime.sh"
 
 echo "[INFO] Open WebUI started: http://127.0.0.1:${HOST_PORT}"

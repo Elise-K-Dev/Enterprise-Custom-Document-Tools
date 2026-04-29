@@ -1,0 +1,29 @@
+[
+  {
+    "type": "openapi",
+    "url": "http://won-confirm-service:8010",
+    "spec_type": "url",
+    "path": "/openapi.json",
+    "auth_type": "none",
+    "headers": {
+      "X-Port-Project-Internal-Token": "REPLACE_WITH_PORT_PROJECT_INTERNAL_TOKEN"
+    },
+    "key": "",
+    "info": {
+      "id": "won_confirm",
+      "name": "Pink Sphinx Module",
+      "description": "Private plan review tool. Only elise and Sock can access it."
+    },
+    "config": {
+      "enable": true,
+      "function_name_filter_list": "won_confirm_review",
+      "access_grants": [
+        {
+          "principal_type": "user",
+          "principal_id": "REPLACE_WITH_ELISE_OR_SOCK_USER_ID",
+          "permission": "read"
+        }
+      ]
+    }
+  }
+]

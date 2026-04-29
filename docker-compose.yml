@@ -20,6 +20,8 @@ services:
         condition: service_healthy
       suno-service:
         condition: service_healthy
+      won-confirm-service:
+        condition: service_healthy
     healthcheck:
       test: ["CMD", "curl", "--silent", "--fail", "http://127.0.0.1:8080/health"]
       interval: 15s
@@ -177,6 +179,38 @@ services:
       - "host.docker.internal:host-gateway"
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8005/health')"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    networks:
+      - port-project
+
+  won-confirm-service:
+    image: port-project-pink-sphinx-module
+    build:
+      context: ./Pink_Sphinx_Module
+      dockerfile: Dockerfile
+      network: host
+      args:
+        PYTHON_BASE_IMAGE: port-project-base-python:3.11-slim
+    environment:
+      WON_CONFIRM_HOST: 0.0.0.0
+      WON_CONFIRM_PORT: 8010
+      GEMMA_API_URL: ${GEMMA_API_URL:-http://192.168.100.13:8000/v1/chat/completions}
+      GEMMA_MODEL: ${GEMMA_MODEL:-gemma-4-31b-it}
+      GEMMA_API_KEY: ${GEMMA_API_KEY:-}
+      GEMMA_TIMEOUT_SECONDS: ${GEMMA_TIMEOUT_SECONDS:-30}
+      PORT_PROJECT_INTERNAL_TOKEN: ${PORT_PROJECT_INTERNAL_TOKEN:?PORT_PROJECT_INTERNAL_TOKEN is required}
+      WON_CONFIRM_ALLOWED_EMAILS: ${WON_CONFIRM_ALLOWED_EMAILS:-elise@local.dev,sock@local.dev}
+      WON_CONFIRM_ALLOWED_NAMES: ${WON_CONFIRM_ALLOWED_NAMES:-elise,Sock}
+      WON_CONFIRM_ALLOWED_USER_IDS: ${WON_CONFIRM_ALLOWED_USER_IDS:-}
+    ports:
+      - "${WON_CONFIRM_SERVICE_PORT:-8010}:8010"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8010/health')"]
       interval: 15s
       timeout: 5s
       retries: 5
