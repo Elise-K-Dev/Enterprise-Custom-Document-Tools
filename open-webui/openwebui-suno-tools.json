@@ -5,12 +5,14 @@
     "spec_type": "url",
     "path": "/openapi.json",
     "auth_type": "none",
-    "headers": null,
+    "headers": {
+      "X-Port-Project-Internal-Token": "REPLACE_WITH_PORT_PROJECT_INTERNAL_TOKEN"
+    },
     "key": "",
     "info": {
       "id": "suno_tools",
-      "name": "Suno 작사·스타일 프롬프트 도구",
-      "description": "Suno V5/V5.5용 노래 가사 작성·개선과 Style 필드 프롬프트 작성·개선을 수행합니다. 사용자가 노래, 가사, Suno, 작사, 스타일 프롬프트, 음악 생성 프롬프트를 말하면 호출합니다. 사내 문서 검색(document_search)이나 일반 보고서 PDF 생성(document_generation_tools)에는 사용하지 않습니다."
+      "name": "수노 도구 (Suno)",
+      "description": "Suno용 노래 가사 작성·개선과 스타일 프롬프트 작성·개선을 수행합니다. 사내 문서 검색이나 일반 보고서 생성에는 사용하지 않습니다."
     },
     "config": {
       "enable": true,
@@ -18,7 +20,7 @@
       "access_grants": [
         {
           "principal_type": "user",
-          "principal_id": "*",
+          "principal_id": "REPLACE_WITH_ELISE_OR_SOCK_USER_ID",
           "permission": "read"
         }
       ]

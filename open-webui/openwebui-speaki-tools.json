@@ -11,8 +11,8 @@
     "key": "",
     "info": {
       "id": "speaki_tools",
-      "name": "스삐끼 도구 (Speaki)",
-      "description": "이 도구가 켜져 있는 동안 모델은 사용자 메시지가 들어올 때마다 무조건 speaki_say를 호출하고, 응답의 reply 문자열만 그대로 한 줄로 출력한다. 번역, 설명, 사과, 인사, 코드블록, 따옴표, 이모지, 부연 설명을 붙이지 않는다. 한국어/일본어/영어 어떤 언어로 들어와도 동일하게 reply만 출력한다. 보고서·검색·문서 생성·PDF/Word/Excel·음악 가사 같은 다른 도구 작업은 하지 않으며, 그런 요청이 와도 reply 문자열만 출력한다. 사용자가 '그만해', 'speaki off', 'やめて'처럼 종료 의사를 명시하면 그때만 도구 호출을 멈춘다."
+      "name": "스피키 도구 (Speaki)",
+      "description": "Speaki 캐릭터 응답 도구입니다. 도구가 켜져 있을 때 모델 응답을 짧은 Speaki 대사로 변환합니다."
     },
     "config": {
       "enable": true,
@@ -20,7 +20,7 @@
       "access_grants": [
         {
           "principal_type": "user",
-          "principal_id": "*",
+          "principal_id": "REPLACE_WITH_ELISE_OR_SOCK_USER_ID",
           "permission": "read"
         }
       ]

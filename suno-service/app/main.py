@@ -29,7 +29,7 @@ INTERNAL_TOKEN_HEADER = "x-port-project-internal-token"
 OPEN_WEBUI_USER_EMAIL_HEADER = "x-openwebui-user-email"
 OPEN_WEBUI_USER_ID_HEADER = "x-openwebui-user-id"
 
-DEFAULT_LLM_API_URL = "http://192.168.100.13:8000/v1/chat/completions"
+DEFAULT_LLM_API_URL = "http://127.0.0.1:8000/v1/chat/completions"
 DEFAULT_LLM_MODEL_ID = "gemma-4-31b-it"
 
 SUNO_TEMPLATE_DIR = Path(os.getenv("SUNO_TEMPLATE_DIR", "/app/templates"))
@@ -62,7 +62,7 @@ def require_registered_tool_user(raw_request: Request) -> dict[str, str]:
     return {"email": email, "user_id": user_id}
 
 
-# ----- LLM call helpers (mirrors python-service pattern) ------------------
+# ----- LLM call helpers ---------------------------------------------------
 
 def call_chat_completions(api_url: str, payload: dict[str, Any]) -> str:
     request = urllib.request.Request(

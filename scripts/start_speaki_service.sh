@@ -13,7 +13,7 @@ if [ -f "$ENV_FILE" ]; then
 fi
 
 if [ -z "${PORT_PROJECT_INTERNAL_TOKEN:-}" ]; then
-  echo "[ERROR] PORT_PROJECT_INTERNAL_TOKEN is required. Run scripts/start_openwebui_with_vllm.sh once or add it to $ENV_FILE."
+  echo "[ERROR] PORT_PROJECT_INTERNAL_TOKEN is required. Add it to $ENV_FILE or export it."
   exit 1
 fi
 

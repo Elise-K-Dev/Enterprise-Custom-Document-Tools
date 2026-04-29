@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-import os
 import json
+import os
 from typing import Any
 
 import httpx
@@ -9,7 +9,7 @@ import httpx
 from models import WonConfirmRequest
 
 
-DEFAULT_GEMMA_API_URL = "http://192.168.100.13:8000/v1/chat/completions"
+DEFAULT_GEMMA_API_URL = "http://127.0.0.1:8000/v1/chat/completions"
 DEFAULT_GEMMA_MODEL = "gemma-4-31b-it"
 
 SYSTEM_PROMPT = """너는 교수 스타일의 검토 코멘트를 생성하는 모델이다.
@@ -111,6 +111,7 @@ async def call_gemma(request: WonConfirmRequest, fixed: dict) -> dict[str, Any]:
     content = message.get("content")
     if not isinstance(content, str) or not content.strip():
         raise ValueError("Gemma response has no content")
+
     from utils import extract_json_object
 
     return extract_json_object(content)
@@ -138,6 +139,6 @@ def build_user_prompt(request: WonConfirmRequest, fixed: dict) -> str:
             request.mode,
             "",
             "rewrite:",
-            json.dumps(request.rewrite),
+            json.dumps(request.rewrite, ensure_ascii=False),
         ]
     )

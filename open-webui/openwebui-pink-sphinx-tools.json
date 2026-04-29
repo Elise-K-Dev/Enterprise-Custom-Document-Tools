@@ -11,8 +11,8 @@
     "key": "",
     "info": {
       "id": "won_confirm",
-      "name": "Pink Sphinx Module",
-      "description": "Private plan review tool. Only elise and Sock can access it."
+      "name": "핑크 스핑크스 (Pink Sphinx)",
+      "description": "교수 스타일의 차갑고 직설적인 계획 검토 도구입니다. elise와 Sock 전용으로 운영합니다."
     },
     "config": {
       "enable": true,
@@ -20,7 +20,12 @@
       "access_grants": [
         {
           "principal_type": "user",
-          "principal_id": "REPLACE_WITH_ELISE_OR_SOCK_USER_ID",
+          "principal_id": "REPLACE_WITH_ELISE_USER_ID",
+          "permission": "read"
+        },
+        {
+          "principal_type": "user",
+          "principal_id": "REPLACE_WITH_SOCK_USER_ID",
           "permission": "read"
         }
       ]

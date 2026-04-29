@@ -13,7 +13,12 @@ if [ -f "$ENV_FILE" ]; then
 fi
 
 if [ -z "${PORT_PROJECT_INTERNAL_TOKEN:-}" ]; then
-  echo "[ERROR] PORT_PROJECT_INTERNAL_TOKEN is required. Run scripts/start_openwebui_with_vllm.sh once or add it to $ENV_FILE."
+  echo "[ERROR] PORT_PROJECT_INTERNAL_TOKEN is required. Add it to $ENV_FILE or export it."
+  exit 1
+fi
+
+if [ -z "${SUNO_LLM_API_URL:-}" ]; then
+  echo "[ERROR] SUNO_LLM_API_URL is required. Add it to $ENV_FILE or export it."
   exit 1
 fi
 
@@ -22,7 +27,7 @@ cd "$PROJECT_DIR/suno-service"
 SUNO_SERVICE_HOST=0.0.0.0 \
 SUNO_SERVICE_PORT=8005 \
 SUNO_SERVICE_PUBLIC_BASE_URL="${SUNO_SERVICE_PUBLIC_BASE_URL:-http://127.0.0.1:8005}" \
-SUNO_LLM_API_URL="${SUNO_LLM_API_URL:-http://192.168.100.13:8000/v1/chat/completions}" \
+SUNO_LLM_API_URL="$SUNO_LLM_API_URL" \
 SUNO_LLM_MODEL_ID="${SUNO_LLM_MODEL_ID:-gemma-4-31b-it}" \
 SUNO_TEMPLATE_DIR="${SUNO_TEMPLATE_DIR:-$PROJECT_DIR/suno-service/templates}" \
 SUNO_GUIDE_HOT_RELOAD="${SUNO_GUIDE_HOT_RELOAD:-true}" \
