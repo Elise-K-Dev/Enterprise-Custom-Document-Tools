@@ -26,6 +26,9 @@ RUST_TOOL_SERVER_URL="${RUST_TOOL_SERVER_URL:-http://127.0.0.1:8001}"
 PARSER_TOOL_SERVER_URL="${PARSER_TOOL_SERVER_URL:-http://127.0.0.1:8002}"
 WEB_TOOL_SERVER_URL="${WEB_TOOL_SERVER_URL:-http://127.0.0.1:8004}"
 SUNO_TOOL_SERVER_URL="${SUNO_TOOL_SERVER_URL:-http://127.0.0.1:8005}"
+WON_CONFIRM_TOOL_SERVER_URL="${WON_CONFIRM_TOOL_SERVER_URL:-http://127.0.0.1:8010}"
+WON_CONFIRM_ALLOWED_EMAILS="${WON_CONFIRM_ALLOWED_EMAILS:-${DEVELOPER_EMAIL},sock@local.dev}"
+WON_CONFIRM_ALLOWED_NAMES="${WON_CONFIRM_ALLOWED_NAMES:-${DEVELOPER_NAME},Sock}"
 DOCUMENT_FILLER_MODEL_ID="${DOCUMENT_FILLER_MODEL_ID:-gemma-4-31b-it}"
 PORT_PROJECT_INTERNAL_TOKEN="${PORT_PROJECT_INTERNAL_TOKEN:-}"
 
@@ -55,6 +58,9 @@ cd "${ROOT_DIR}"
   -e PARSER_TOOL_SERVER_URL="${PARSER_TOOL_SERVER_URL}" \
   -e WEB_TOOL_SERVER_URL="${WEB_TOOL_SERVER_URL}" \
   -e SUNO_TOOL_SERVER_URL="${SUNO_TOOL_SERVER_URL}" \
+  -e WON_CONFIRM_TOOL_SERVER_URL="${WON_CONFIRM_TOOL_SERVER_URL}" \
+  -e WON_CONFIRM_ALLOWED_EMAILS="${WON_CONFIRM_ALLOWED_EMAILS}" \
+  -e WON_CONFIRM_ALLOWED_NAMES="${WON_CONFIRM_ALLOWED_NAMES}" \
   -e DOCUMENT_FILLER_MODEL_ID="${DOCUMENT_FILLER_MODEL_ID}" \
   -e PORT_PROJECT_INTERNAL_TOKEN="${PORT_PROJECT_INTERNAL_TOKEN}" \
   open-webui \
@@ -389,11 +395,52 @@ def upsert_tool_server(existing_servers: List[Dict[str, Any]], desired_server: D
     existing_servers.append(desired_server)
 
 
-def sync_tool_servers() -> None:
+async def resolve_won_confirm_access_grants() -> List[Dict[str, str]]:
+    emails = [
+        item.strip().lower()
+        for item in os.getenv("WON_CONFIRM_ALLOWED_EMAILS", "").split(",")
+        if item.strip()
+    ]
+    names = [
+        item.strip().casefold()
+        for item in os.getenv("WON_CONFIRM_ALLOWED_NAMES", "").split(",")
+        if item.strip()
+    ]
+    allowed_user_ids = []
+    seen = set()
+
+    for email in emails:
+        user = await Users.get_user_by_email(email)
+        if user and user.id not in seen:
+            seen.add(user.id)
+            allowed_user_ids.append(user.id)
+
+    users_for_name_lookup = []
+    for method_name in ("get_users", "get_all_users"):
+        method = getattr(Users, method_name, None)
+        if method:
+            users_for_name_lookup = await method()
+            break
+
+    if names and users_for_name_lookup:
+        for user in users_for_name_lookup:
+            user_name = (getattr(user, "name", "") or "").strip().casefold()
+            if user_name in names and user.id not in seen:
+                seen.add(user.id)
+                allowed_user_ids.append(user.id)
+
+    return [
+        {"principal_type": "user", "principal_id": user_id, "permission": "read"}
+        for user_id in allowed_user_ids
+    ]
+
+
+async def sync_tool_servers() -> None:
     rust_tool_server_url = os.getenv("RUST_TOOL_SERVER_URL", "http://127.0.0.1:8001").rstrip("/")
     parser_tool_server_url = os.getenv("PARSER_TOOL_SERVER_URL", "http://127.0.0.1:8002").rstrip("/")
     web_tool_server_url = os.getenv("WEB_TOOL_SERVER_URL", "http://127.0.0.1:8004").rstrip("/")
     suno_tool_server_url = os.getenv("SUNO_TOOL_SERVER_URL", "http://127.0.0.1:8005").rstrip("/")
+    won_confirm_tool_server_url = os.getenv("WON_CONFIRM_TOOL_SERVER_URL", "http://127.0.0.1:8010").rstrip("/")
     internal_token = os.environ["PORT_PROJECT_INTERNAL_TOKEN"]
     internal_headers = {
         "X-Port-Project-Internal-Token": internal_token,
@@ -405,6 +452,7 @@ def sync_tool_servers() -> None:
             "permission": "read",
         }
     ]
+    won_confirm_access_grants = await resolve_won_confirm_access_grants()
     desired_servers = [
         {
             "type": "openapi",
@@ -482,6 +530,25 @@ def sync_tool_servers() -> None:
                 "access_grants": public_read_grants,
             },
         },
+        {
+            "type": "openapi",
+            "url": won_confirm_tool_server_url,
+            "spec_type": "url",
+            "path": "/openapi.json",
+            "auth_type": "none",
+            "headers": internal_headers,
+            "key": "",
+            "info": {
+                "id": "won_confirm",
+                "name": "Pink Sphinx Module",
+                "description": "Private plan review tool. Only elise and Sock can access it.",
+            },
+            "config": {
+                "enable": True,
+                "function_name_filter_list": "won_confirm_review",
+                "access_grants": won_confirm_access_grants,
+            },
+        },
     ]
 
     current = TOOL_SERVER_CONNECTIONS.value
@@ -494,6 +561,7 @@ def sync_tool_servers() -> None:
         "legacy_md_search",
         "web_tools",
         "suno_tools",
+        "won_confirm",
     }
     tool_servers = [
         server
@@ -529,6 +597,7 @@ def sync_default_model_metadata() -> None:
         "server:markdown_pdf_tools",
         "server:purchase_document_conversation_tools",
         "server:legacy_md_search",
+        "server:won_confirm",
     }
     merged_tool_ids = []
     for tool_id in tool_ids:
@@ -581,6 +650,7 @@ async def sync_existing_model_tool_ids() -> None:
             "server:purchase_document_conversation_tools",
             "server:markdown_pdf_tools",
             "server:legacy_md_search",
+            "server:won_confirm",
         }
         merged_tool_ids = [
             tool_id
@@ -686,7 +756,7 @@ async def main() -> None:
         },
     )
     await sync_groups()
-    sync_tool_servers()
+    await sync_tool_servers()
     sync_default_models()
     sync_default_model_metadata()
     await sync_existing_model_tool_ids()
