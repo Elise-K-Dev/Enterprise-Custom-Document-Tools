@@ -4,7 +4,7 @@ import json
 from typing import Any
 
 from fallback import build_fallback_response
-from models import Score, WonConfirmRequest, WonConfirmResponse
+from models import JudgeRequest, JudgeResponse, Score
 
 
 REQUIRED_LLM_FIELDS = (
@@ -39,8 +39,8 @@ def extract_json_object(raw: str) -> dict[str, Any]:
 def validate_and_merge_llm_output(
     llm_output: dict[str, Any],
     fixed: dict,
-    request: WonConfirmRequest,
-) -> WonConfirmResponse:
+    request: JudgeRequest,
+) -> JudgeResponse:
     fallback = build_fallback_response(request, fixed)
     data: dict[str, Any] = {}
 
@@ -64,7 +64,7 @@ def validate_and_merge_llm_output(
     if not request.rewrite:
         data["rewritten_version"] = ""
 
-    return WonConfirmResponse(
+    return JudgeResponse(
         judgement=fixed["judgement"],
         score=_score_from_fixed(fixed["score"]),
         weakest_area=fixed["weakest_area"],
@@ -85,8 +85,7 @@ def _score_from_fixed(value: Score | dict[str, Any]) -> Score:
 def _string_list(value: Any) -> list[str]:
     if not isinstance(value, list):
         return []
-    out = [str(item).strip() for item in value if str(item).strip()]
-    return out
+    return [str(item).strip() for item in value if str(item).strip()]
 
 
 def _limit_chars(value: str, limit: int) -> str:

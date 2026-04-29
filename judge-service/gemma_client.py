@@ -6,7 +6,7 @@ from typing import Any
 
 import httpx
 
-from models import WonConfirmRequest
+from models import JudgeRequest
 
 
 DEFAULT_GEMMA_API_URL = "http://127.0.0.1:8000/v1/chat/completions"
@@ -78,7 +78,7 @@ SYSTEM_PROMPT = """너는 교수 스타일의 검토 코멘트를 생성하는 �
 """
 
 
-async def call_gemma(request: WonConfirmRequest, fixed: dict) -> dict[str, Any]:
+async def call_gemma(request: JudgeRequest, fixed: dict) -> dict[str, Any]:
     api_url = os.getenv("GEMMA_API_URL") or os.getenv("DOCUMENT_FILLER_API_URL") or DEFAULT_GEMMA_API_URL
     model = os.getenv("GEMMA_MODEL") or os.getenv("DOCUMENT_FILLER_MODEL_ID") or DEFAULT_GEMMA_MODEL
     api_key = os.getenv("GEMMA_API_KEY", "").strip()
@@ -117,7 +117,7 @@ async def call_gemma(request: WonConfirmRequest, fixed: dict) -> dict[str, Any]:
     return extract_json_object(content)
 
 
-def build_user_prompt(request: WonConfirmRequest, fixed: dict) -> str:
+def build_user_prompt(request: JudgeRequest, fixed: dict) -> str:
     score_json = json.dumps(fixed["score"].model_dump(), ensure_ascii=False)
     return "\n".join(
         [

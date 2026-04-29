@@ -9,7 +9,7 @@ services:
     ports: !reset []
     networks: !reset []
 
-  won-confirm-service:
+  judge-service:
     network_mode: host
     ports: !reset []
     networks: !reset []

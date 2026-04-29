@@ -1,7 +1,7 @@
 [
   {
     "type": "openapi",
-    "url": "http://won-confirm-service:8010",
+    "url": "http://judge-service:8010",
     "spec_type": "url",
     "path": "/openapi.json",
     "auth_type": "none",
@@ -10,13 +10,13 @@
     },
     "key": "",
     "info": {
-      "id": "won_confirm",
-      "name": "핑크 스핑크스 (Pink Sphinx)",
-      "description": "교수 스타일의 차갑고 직설적인 계획 검토 도구입니다. elise와 Sock 전용으로 운영합니다."
+      "id": "judge_tools",
+      "name": "Judge",
+      "description": "계획, 보고서, 아이디어를 차갑고 직설적인 한국어 코멘트로 검토하는 도구입니다. elise와 Sock 전용으로 운영합니다."
     },
     "config": {
       "enable": true,
-      "function_name_filter_list": "won_confirm_review",
+      "function_name_filter_list": "judge_review",
       "access_grants": [
         {
           "principal_type": "user",

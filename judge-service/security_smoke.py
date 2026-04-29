@@ -9,14 +9,14 @@ def main() -> None:
     client = TestClient(app)
     payload = {"text": "good chatbot", "mode": "savage", "rewrite": True}
 
-    no_token = client.post("/tools/won-confirm", json=payload)
+    no_token = client.post("/tools/judge", json=payload)
     no_token_openapi = client.get("/openapi.json")
     internal_openapi = client.get(
         "/openapi.json",
         headers={"X-Port-Project-Internal-Token": "test-token"},
     )
     normal = client.post(
-        "/tools/won-confirm",
+        "/tools/judge",
         json=payload,
         headers={
             "X-Port-Project-Internal-Token": "test-token",
@@ -26,7 +26,7 @@ def main() -> None:
         },
     )
     elise = client.post(
-        "/tools/won-confirm",
+        "/tools/judge",
         json=payload,
         headers={
             "X-Port-Project-Internal-Token": "test-token",
@@ -36,11 +36,11 @@ def main() -> None:
         },
     )
     sock = client.post(
-        "/tools/won-confirm",
+        "/tools/judge",
         json=payload,
         headers={
             "X-Port-Project-Internal-Token": "test-token",
-            "X-OpenWebUI-User-Email": "someone@example.com",
+            "X-OpenWebUI-User-Email": "sock@gmail.com",
             "X-OpenWebUI-User-Id": "sock-id",
             "X-OpenWebUI-User-Name": "Sock",
         },

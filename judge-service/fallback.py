@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import re
 
-from models import Area, Score, WonConfirmRequest, WonConfirmResponse
+from models import Area, JudgeRequest, JudgeResponse, Score
 
 
 JUDGEMENT_KO = {
@@ -13,25 +13,16 @@ JUDGEMENT_KO = {
 }
 
 SARCASM_BY_AREA: dict[Area, str] = {
-    "purpose": "목적이 흐리면 나머지는 다 장식임.",
-    "scope": "지금 범위로는 완주 못 함.",
-    "feasibility": "구현이 아니라 기대에 가까움.",
-    "validation": "성공 기준이 없으면 실패도 정의 안 됨.",
-    "deliverable": "결과물이 안 보이면 진행도 안 보임.",
-    "logic": "흐름이 아니라 생각 조각 모음임.",
-}
-
-AREA_LABEL = {
-    "purpose": "목적",
-    "scope": "범위",
-    "feasibility": "구현 가능성",
-    "validation": "검증 기준",
-    "deliverable": "결과물",
-    "logic": "논리 흐름",
+    "purpose": "목적이 흐리면 나머지는 장식이다.",
+    "scope": "지금 범위로는 아무것도 못 끝낸다.",
+    "feasibility": "구현 근거가 아니라 기대에 가깝다.",
+    "validation": "검증 기준이 없으면 실패도 정의 못 한다.",
+    "deliverable": "결과물이 안 보이면 진행도 안 보인다.",
+    "logic": "흐름이 아니라 생각 조각 모음이다.",
 }
 
 
-def build_fallback_response(request: WonConfirmRequest, fixed: dict) -> WonConfirmResponse:
+def build_fallback_response(request: JudgeRequest, fixed: dict) -> JudgeResponse:
     score: Score = fixed["score"]
     judgement = fixed["judgement"]
     weakest_area: Area = fixed["weakest_area"]
@@ -40,7 +31,7 @@ def build_fallback_response(request: WonConfirmRequest, fixed: dict) -> WonConfi
     revision_orders = build_revision_orders(score)
     professor_comment = build_professor_comment(judgement, sarcastic_slot, problems, revision_orders)
     rewritten_version = build_rewritten_version(request.text, request.rewrite)
-    return WonConfirmResponse(
+    return JudgeResponse(
         judgement=judgement,
         score=score,
         weakest_area=weakest_area,
@@ -67,7 +58,7 @@ def build_problem_sentences(score: Score) -> list[str]:
     if score.logic == 0:
         problems.append("문서 흐름이 없음.")
     if not problems:
-        problems.append("핵심 요소는 있으나 실행 기준이 더 선명해야 함.")
+        problems.append("실행 요소는 있으나 기준이 더 선명해야 함.")
     return problems
 
 
@@ -80,7 +71,7 @@ def build_revision_orders(score: Score) -> list[str]:
     if score.validation < 2:
         orders.append("성공 기준을 숫자로 정의")
     if score.deliverable < 2:
-        orders.append("최종 결과물을 파일, API, 테스트 단위로 명시")
+        orders.append("최종 결과물을 파일, API, 화면 단위로 명시")
     if score.feasibility < 2:
         orders.append("사용 기술과 구현 방식을 구체화")
     if score.logic < 2:
@@ -141,10 +132,9 @@ def build_rewritten_version(text: str, rewrite: bool) -> str:
 
 
 def _find_sentence(text: str, keywords: tuple[str, ...]) -> str:
-    sentences = [part.strip() for part in re.split(r"[.!?\n。]+", text) if part.strip()]
+    sentences = [part.strip() for part in re.split(r"[.!?\n]+", text) if part.strip()]
     for sentence in sentences:
         lower = sentence.lower()
         if any(keyword.lower() in lower for keyword in keywords):
             return sentence
     return "추가 정의 필요"
-

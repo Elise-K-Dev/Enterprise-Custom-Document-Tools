@@ -51,24 +51,24 @@ services:
     networks:
       - brainless
 
-  won-confirm-service:
-    image: brainless-pink-sphinx-module
+  judge-service:
+    image: brainless-judge-service
     build:
-      context: ./Pink_Sphinx_Module
+      context: ./judge-service
       dockerfile: Dockerfile
     environment:
-      WON_CONFIRM_HOST: 0.0.0.0
-      WON_CONFIRM_PORT: 8010
+      JUDGE_HOST: 0.0.0.0
+      JUDGE_PORT: 8010
       GEMMA_API_URL: ${GEMMA_API_URL:?GEMMA_API_URL is required}
       GEMMA_MODEL: ${GEMMA_MODEL:-gemma-4-31b-it}
       GEMMA_API_KEY: ${GEMMA_API_KEY:-}
       GEMMA_TIMEOUT_SECONDS: ${GEMMA_TIMEOUT_SECONDS:-30}
       PORT_PROJECT_INTERNAL_TOKEN: ${PORT_PROJECT_INTERNAL_TOKEN:?PORT_PROJECT_INTERNAL_TOKEN is required}
-      WON_CONFIRM_ALLOWED_EMAILS: ${WON_CONFIRM_ALLOWED_EMAILS:-elise@local.dev,sock@gmail.com}
-      WON_CONFIRM_ALLOWED_NAMES: ${WON_CONFIRM_ALLOWED_NAMES:-elise,Sock}
-      WON_CONFIRM_ALLOWED_USER_IDS: ${WON_CONFIRM_ALLOWED_USER_IDS:-}
+      JUDGE_ALLOWED_EMAILS: ${JUDGE_ALLOWED_EMAILS:-elise@local.dev,sock@gmail.com}
+      JUDGE_ALLOWED_NAMES: ${JUDGE_ALLOWED_NAMES:-elise,Sock}
+      JUDGE_ALLOWED_USER_IDS: ${JUDGE_ALLOWED_USER_IDS:-}
     ports:
-      - "${WON_CONFIRM_SERVICE_PORT:-8010}:8010"
+      - "${JUDGE_SERVICE_PORT:-8010}:8010"
     extra_hosts:
       - "host.docker.internal:host-gateway"
     healthcheck:

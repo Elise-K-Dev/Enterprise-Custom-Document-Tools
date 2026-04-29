@@ -9,12 +9,12 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from fallback import build_fallback_response
 from gemma_client import call_gemma
-from models import WonConfirmRequest, WonConfirmResponse
+from models import JudgeRequest, JudgeResponse
 from scoring import fixed_assessment
 from utils import validate_and_merge_llm_output
 
 
-app = FastAPI(title="won-confirm", version="0.1.0", openapi_url=None)
+app = FastAPI(title="judge-service", version="0.1.0", openapi_url=None)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -34,8 +34,8 @@ def health() -> dict[str, str]:
     return {"status": "ok"}
 
 
-@app.post("/tools/won-confirm", response_model=WonConfirmResponse)
-async def won_confirm(request: WonConfirmRequest, raw_request: Request) -> WonConfirmResponse:
+@app.post("/tools/judge", response_model=JudgeResponse)
+async def judge_review(request: JudgeRequest, raw_request: Request) -> JudgeResponse:
     require_allowed_account(raw_request)
     fixed = fixed_assessment(request.text, request.mode)
     try:
@@ -51,9 +51,9 @@ def require_allowed_account(raw_request: Request) -> None:
     user_id = (raw_request.headers.get(OPEN_WEBUI_USER_ID_HEADER) or "").strip()
     name = (raw_request.headers.get(OPEN_WEBUI_USER_NAME_HEADER) or "").strip().casefold()
 
-    allowed_emails = _csv_env("WON_CONFIRM_ALLOWED_EMAILS", "elise@local.dev,sock@local.dev")
-    allowed_names = _csv_env("WON_CONFIRM_ALLOWED_NAMES", "elise,Sock")
-    allowed_ids = _csv_env("WON_CONFIRM_ALLOWED_USER_IDS", "")
+    allowed_emails = _csv_env("JUDGE_ALLOWED_EMAILS", "elise@local.dev,sock@gmail.com")
+    allowed_names = _csv_env("JUDGE_ALLOWED_NAMES", "elise,Sock")
+    allowed_ids = _csv_env("JUDGE_ALLOWED_USER_IDS", "")
 
     email_allowed = bool(email) and email in {item.lower() for item in allowed_emails}
     name_allowed = bool(name) and name in {item.casefold() for item in allowed_names}
@@ -62,7 +62,6 @@ def require_allowed_account(raw_request: Request) -> None:
     if email_allowed or name_allowed or id_allowed:
         return
 
-    # Deliberately hide the tool from non-allowed accounts and direct callers.
     raise HTTPException(status_code=404, detail="not found")
 
 
@@ -86,19 +85,19 @@ def openapi_spec(raw_request: Request) -> dict[str, Any]:
     return {
         "openapi": "3.0.0",
         "info": {
-            "title": "won-confirm",
+            "title": "judge-service",
             "version": "0.1.0",
             "description": (
-                "사용자가 입력한 계획서, 보고서, 아이디어를 규칙 기반으로 채점하고 "
-                "Gemma 4를 이용해 교수 스타일 피드백을 생성하는 OpenWebUI 도구입니다. "
-                "판정, 점수, weakest_area는 항상 코드가 계산합니다."
+                "사용자 입력 계획, 보고서, 아이디어를 규칙 기반으로 채점하고 "
+                "차갑고 직설적인 한국어 검토 코멘트를 생성하는 Open WebUI 도구입니다. "
+                "judgement, score, weakest_area는 코드가 고정 계산합니다."
             ),
         },
-        "servers": [{"url": "http://won-confirm-service:8010"}],
+        "servers": [{"url": "http://judge-service:8010"}],
         "paths": {
             "/health": {
                 "get": {
-                    "operationId": "won_confirm_health_check",
+                    "operationId": "judge_health_check",
                     "summary": "Health check",
                     "responses": {
                         "200": {
@@ -115,14 +114,14 @@ def openapi_spec(raw_request: Request) -> dict[str, Any]:
                     },
                 }
             },
-            "/tools/won-confirm": {
+            "/tools/judge": {
                 "post": {
-                    "operationId": "won_confirm_review",
-                    "summary": "계획서/보고서/아이디어 텍스트를 규칙 기반으로 검토",
+                    "operationId": "judge_review",
+                    "summary": "계획이나 아이디어를 규칙 기반으로 검토",
                     "description": (
                         "입력 텍스트를 purpose, scope, feasibility, validation, deliverable, logic "
-                        "6개 항목으로 채점하고, 고정 판정과 가장 약한 영역을 기준으로 교수 스타일 "
-                        "피드백을 반환합니다. LLM 실패 시에도 규칙 기반 fallback을 반환합니다."
+                        "6개 항목으로 채점하고 고정 판정과 가장 약한 영역을 기준으로 검토 코멘트를 반환합니다. "
+                        "LLM 호출 실패 시 규칙 기반 fallback을 반환합니다."
                     ),
                     "requestBody": {
                         "required": True,

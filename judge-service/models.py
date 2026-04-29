@@ -10,7 +10,7 @@ Judgement = Literal["PASS", "CONDITIONAL_PASS", "REVISION_REQUIRED", "REJECT"]
 Area = Literal["purpose", "scope", "feasibility", "validation", "deliverable", "logic"]
 
 
-class WonConfirmRequest(BaseModel):
+class JudgeRequest(BaseModel):
     text: str = Field(..., min_length=1, description="Text to review")
     mode: Mode = Field(default="normal", description="Review mode")
     rewrite: bool = Field(default=True, description="Whether to produce a structured rewrite")
@@ -26,7 +26,7 @@ class Score(BaseModel):
     total: int = Field(ge=0, le=12)
 
 
-class WonConfirmResponse(BaseModel):
+class JudgeResponse(BaseModel):
     judgement: Judgement
     score: Score
     weakest_area: Area
@@ -35,4 +35,3 @@ class WonConfirmResponse(BaseModel):
     problems: list[str]
     revision_orders: list[str]
     rewritten_version: str
-

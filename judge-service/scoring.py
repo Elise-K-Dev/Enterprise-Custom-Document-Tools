@@ -33,37 +33,14 @@ JUDGEMENT_ORDER: list[Judgement] = [
 KEYWORDS = {
     "purpose": ("목적", "목표", "왜", "문제", "해결", "필요", "goal", "objective", "why"),
     "scope": ("mvp", "1차", "범위", "단계", "제외", "최소 기능", "우선", "phase"),
-    "feasibility": (
-        "구현",
-        "기술",
-        "api",
-        "서버",
-        "데이터",
-        "모델",
-        "db",
-        "rust",
-        "python",
-        "docker",
-        "fastapi",
-    ),
-    "validation": (
-        "검증",
-        "기준",
-        "지표",
-        "metric",
-        "정확도",
-        "성공 기준",
-        "실패 기준",
-        "latency",
-        "성능",
-        "테스트",
-    ),
+    "feasibility": ("구현", "기술", "api", "서버", "데이터", "모델", "db", "rust", "python", "docker", "fastapi"),
+    "validation": ("검증", "기준", "지표", "metric", "정확도", "성공 기준", "실패 기준", "latency", "성능", "테스트"),
     "deliverable": ("결과물", "코드", "api", "문서", "모델", "보고서", "ui", "cli", "서버", "테스트 코드"),
     "logic": ("1.", "2.", "3.", "-", "##", "###", "단계", "구성", "흐름"),
 }
 
 SCOPE_PENALTIES = ("전체", "모든", "완전 자동화", "전부", "다")
-VALIDATION_NUMERIC_RE = re.compile(r"(\d+|\d+\.\d+|%|퍼센트|ms|sec|초|개|회|threshold|p95)", re.IGNORECASE)
+VALIDATION_NUMERIC_RE = re.compile(r"(\d+|\d+\.\d+|%|퍼센트|ms|sec|초|개|건|threshold|p95)", re.IGNORECASE)
 
 
 def score_text(text: str) -> Score:
@@ -86,7 +63,6 @@ def score_text(text: str) -> Score:
         validation = min(2, validation + 1)
 
     deliverable = _keyword_score(lower, KEYWORDS["deliverable"])
-
     logic = _score_logic(normalized)
 
     total = purpose + scope + feasibility + validation + deliverable + logic
@@ -145,14 +121,14 @@ def _keyword_score(text: str, keywords: tuple[str, ...]) -> int:
 
 
 def _has_clear_purpose_sentence(text: str) -> bool:
-    sentences = re.split(r"[.!?\n。]+", text)
+    sentences = re.split(r"[.!?\n]+", text)
     for sentence in sentences:
         compact = sentence.strip()
         if not compact:
             continue
         has_purpose = any(keyword in compact.lower() for keyword in KEYWORDS["purpose"])
         clear_length = 12 <= len(compact) <= 120
-        has_copula = any(token in compact for token in ("이다", "것이다", "한다", "위해", "만드는"))
+        has_copula = any(token in compact for token in ("이다", "것이다", "한다", "위해", "만든다"))
         if has_purpose and clear_length and has_copula:
             return True
     return False
@@ -177,4 +153,3 @@ def _score_logic(text: str) -> int:
 def _downgrade(judgement: Judgement) -> Judgement:
     index = JUDGEMENT_ORDER.index(judgement)
     return JUDGEMENT_ORDER[max(0, index - 1)]
-
