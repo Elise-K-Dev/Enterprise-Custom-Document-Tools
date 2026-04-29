@@ -20,6 +20,8 @@ services:
         condition: service_healthy
       suno-service:
         condition: service_healthy
+      speaki-service:
+        condition: service_healthy
       won-confirm-service:
         condition: service_healthy
     healthcheck:
@@ -179,6 +181,32 @@ services:
       - "host.docker.internal:host-gateway"
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8005/health')"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    networks:
+      - port-project
+
+  speaki-service:
+    image: port-project-speaki-service
+    build:
+      context: ./speaki-service
+      dockerfile: Dockerfile
+      network: host
+      args:
+        PYTHON_BASE_IMAGE: port-project-base-python:3.11-slim
+    environment:
+      SPEAKI_SERVICE_HOST: 0.0.0.0
+      SPEAKI_SERVICE_PORT: 8006
+      SPEAKI_SERVICE_PUBLIC_BASE_URL: ${SPEAKI_SERVICE_PUBLIC_BASE_URL:-http://127.0.0.1:8006}
+      PORT_PROJECT_INTERNAL_TOKEN: ${PORT_PROJECT_INTERNAL_TOKEN:?PORT_PROJECT_INTERNAL_TOKEN is required}
+    ports:
+      - "${SPEAKI_SERVICE_PORT:-8006}:8006"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8006/health')"]
       interval: 15s
       timeout: 5s
       retries: 5
